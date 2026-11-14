@@ -25,6 +25,18 @@ export function createProgressSink(
   const mode = adapter.capabilities.progress;
   let messageId: string | null = null;
   let streamId: string | null = null;
+  let started = false;
+  let closed = false;
+  let lastLine = "";
+  let inFlight: Promise<void> | null = null;
+
+  function track(task: Promise<void>): Promise<void> {
+    const wrapped = task.finally(() => {
+      if (inFlight === wrapped) inFlight = null;
+    });
+    inFlight = wrapped;
+    return wrapped;
+  }
 
   async function editInPlace(text: string): Promise<void> {
     if (!messageId) return;
@@ -35,38 +47,70 @@ export function createProgressSink(
 
   return {
     get messageId() {
-      return messageId;
+      return messageId ?? streamId;
     },
     async start() {
-      if (mode === "none") return;
-      if (mode === "typing") {
-        await adapter.sendTyping?.(chatId).catch(() => {});
-        return;
-      }
-      if (mode === "edit") {
-        const sent = await adapter.sendText({ chatId, threadId, text: PLACEHOLDER });
-        messageId = sent.messageId ?? null;
-        return;
-      }
-      if (adapter.streamStart) {
-        const stream = await adapter.streamStart(chatId, threadId);
-        streamId = stream.streamId;
-      }
+      if (mode === "none" || closed || started) return;
+      await track(
+        (async () => {
+          if (mode === "typing") {
+            await adapter.sendTyping?.(chatId).catch(() => {});
+            started = true;
+            return;
+          }
+          if (mode === "edit") {
+            const sent = await adapter.sendText({ chatId, threadId, text: PLACEHOLDER });
+            messageId = sent.messageId ?? null;
+            if (messageId) adapter.rememberOwnMessage?.(messageId);
+            lastLine = PLACEHOLDER;
+            started = true;
+            return;
+          }
+          if (adapter.streamStart) {
+            const stream = await adapter.streamStart(chatId, threadId);
+            streamId = stream.streamId;
+            started = true;
+          }
+        })(),
+      );
     },
     async refresh(elapsedSeconds, activity) {
+      if (mode === "none" || closed || !started || inFlight !== null) return;
       if (mode === "typing") {
-        await adapter.sendTyping?.(chatId).catch(() => {});
+        await track(adapter.sendTyping?.(chatId).catch(() => {}) ?? Promise.resolve());
         return;
       }
       const line = activity ? `⏳ ${elapsedSeconds}s · ${activity}` : `⏳ ${elapsedSeconds}s`;
-      if (mode === "edit") return editInPlace(line);
+      if (line === lastLine) return;
+      if (mode === "edit") {
+        await track(
+          (async () => {
+            if (closed || !messageId) return;
+            await editInPlace(line);
+            lastLine = line;
+          })(),
+        );
+        return;
+      }
       if (streamId && adapter.streamAppend) {
-        await adapter.streamAppend(streamId, line).catch(() => {});
+        const id = streamId;
+        await track(
+          (async () => {
+            if (closed) return;
+            await adapter.streamAppend!(id, line).catch((error) => {
+              log("warn", `流式进度更新失败：${(error as Error).message}`);
+            });
+            lastLine = line;
+          })(),
+        );
       }
     },
     async finish(answer): Promise<SendResult | null> {
+      closed = true;
+      if (mode === "none" || mode === "typing") return null;
+      if (inFlight) await inFlight.catch(() => {});
       if (mode === "edit" && messageId) {
-        await editInPlace(answer);
+        await adapter.editMessage!(messageId, chatId, answer);
         return { messageId };
       }
       if (mode === "stream" && streamId && adapter.streamFinish) {
@@ -76,6 +120,9 @@ export function createProgressSink(
       return null;
     },
     async abandon() {
+      closed = true;
+      if (mode === "none" || mode === "typing") return;
+      if (inFlight) await inFlight.catch(() => {});
       if (mode === "edit" && messageId) {
         await editInPlace("任务未完成，请在 Paseo 中查看详情。");
       }

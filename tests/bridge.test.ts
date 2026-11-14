@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import { Bridge, DeferredTimeoutError, type BridgeDeps } from "../server/bridge.ts";
+import { createProgressSink } from "../server/progress.ts";
 import { Router } from "../server/routing.ts";
 import { AgentQueue } from "../server/queue.ts";
 import { StateStore } from "../server/state-store.ts";
@@ -183,7 +184,7 @@ test("私聊消息全链路：派发→等待→分段回复", async () => {
   await h.bridge.handle(dmMessage());
   await h.queue.idle();
   assert.equal(h.agentCalls.send.length, 1);
-  assert.ok(h.agentCalls.send[0]!.text.includes("帮我看看构建日志"));
+  assert.equal(h.agentCalls.send[0]!.text, "帮我看看构建日志");
   assert.ok(
     h.sent.some((out) => out.text === "模型回答"),
     `sent=${JSON.stringify(h.sent.map((out) => out.text))} logs=${JSON.stringify(h.logs)} job=${JSON.stringify(h.state.job("m1"))}`,
@@ -191,6 +192,22 @@ test("私聊消息全链路：派发→等待→分段回复", async () => {
   const job = h.state.job("m1");
   assert.equal(job?.delivery, "done");
   assert.equal(job?.agentId, AGENT_ID);
+  h.deferred.stop();
+});
+
+test("首轮完成后原子持久化续跑游标并注册跟踪", async () => {
+  const h = await harness({});
+  const tracked: string[] = [];
+  h.deps.followups = { track: (id) => tracked.push(id) };
+  await h.bridge.handle(dmMessage());
+  await h.queue.idle();
+  assert.deepEqual(tracked, ["m1"]);
+  const job = h.state.job("m1");
+  assert.equal(job?.delivery, "done");
+  assert.equal(job?.answer, "模型回答");
+  assert.deepEqual(job?.followup?.cursor, job?.after);
+  assert.equal(job?.followup?.lastAnswer, "模型回答");
+  await h.state.drain();
   h.deferred.stop();
 });
 
@@ -408,4 +425,49 @@ test("异步提问兜底：多于一个未答问题时不猜，按新任务处�
   assert.ok(job);
   assert.equal(job.questionReply, null, "未命中兜底，按新任务建 job");
   h.deferred.stop();
+});
+
+test("ProgressSink：跳过并发重叠刷新，且 finish 等待在途刷新完成后再写回最终答案", async () => {
+  const edits: string[] = [];
+  const firstEditGate = Promise.withResolvers<void>();
+  const adapter: ChannelAdapter = {
+    channel: "slack",
+    capabilities: {
+      progress: "edit",
+      markdown: "custom",
+      uploadImage: true,
+      uploadFile: true,
+      reactions: false,
+      typing: false,
+      maxChunkChars: 11_000,
+      threads: true,
+    },
+    async sendText() {
+      return { messageId: "msg-progress-1" };
+    },
+    async editMessage(_id, _chatId, text) {
+      if (text.startsWith("⏳ 4s")) {
+        await firstEditGate.promise;
+      }
+      edits.push(text);
+    },
+    async start() {},
+    async stop() {},
+  };
+  const sink = createProgressSink(adapter, "D0DIRECT", "1700000000.1", () => {});
+  await sink.start();
+  assert.equal(sink.messageId, "msg-progress-1");
+
+  // 第 4s 刷新进入慢网络等待；期间到达的第 8s 刷新应被跳过，不堆积并发请求
+  const refresh4 = sink.refresh(4, "正在思考…");
+  await sink.refresh(8, "正在执行 bash…");
+
+  // finish 在第 4s 刷新尚未返回时触发：应等待在途刷新结束后再写最终答案，绝不被旧进度反盖
+  const finishPromise = sink.finish("最终答案");
+  assert.equal(edits.length, 0);
+  firstEditGate.resolve();
+  await Promise.all([refresh4, finishPromise]);
+  await sink.refresh(12, "不应再执行");
+
+  assert.deepEqual(edits, ["⏳ 4s · 正在思考…", "最终答案"]);
 });

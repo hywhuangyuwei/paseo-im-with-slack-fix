@@ -148,3 +148,35 @@ net.setDefaultAutoSelectFamily(false);
 **验证**：重载后日志 `恢复 1 条中断的在途回复。`（weixin/qq 各一）→ 补发走完 `sendmessage ok`（bytes=274，恰好 1 次 HTTP）→ 用户截图确认微信侧恰好显示 1 遍。1 发 = 1 显，出站链路干净；历史「三连显示」若再现即为 iLink 平台显示层。
 
 **附带坑**：并行全量 `npm test` 下 whatsapp 配对测试（二维码→scanned→ok）会时序 flake（10ms 级断言），单独跑必过（HEAD 与改动侧均验证）——判「我的改动弄坏的」之前先单跑该文件。
+
+## 8. Pi 后台续跑的最终答复未回到 IM
+
+**现象**：IM 中收到「任务在后台运行」的首次答复，但 Pi 的后台完成通知唤醒新一轮后生成的最终答复只出现在 Paseo 时间线。
+
+**根因**：桥接等待一次 `waitForFinish`，首次 idle 就标记 job 已投递；随后单独启动的自动续跑没有关联该 job。
+
+**修复**：首次投递时持久化原消息之前的时间线游标。后台轮询仅认原 IM 消息身份之后的 Pi `bg_run` / `bg_delegate` 启动回执，且要求通知和自动唤醒均启用；只有任务 ID 匹配的合成完成通知后的答复才回发原会话。使用服务端 `endCursor` 分页（合并后的 tool call 的 `seqEnd` 可能覆盖其他条目）；时间线重置、缺口、会话改绑、后续用户输入或跟踪超期时停止，避免跨会话泄露。插件重载时恢复持久化跟踪。
+
+**投递语义**：发送前持久化 in-flight 标记。若发送中断或重启时结果不确定，标记 uncertain 并停止自动重发，需人工核对渠道；多渠道无统一幂等键，不能保证此窗口既不丢又不重。旧 job 不会在升级时自动补发。跟踪期限为 7 天；存在新用户输入时旧后台结果故意不自动转发。关联 agent 被关闭时停止跟踪；本逻辑不阻止 Paseo 的闲置运行时回收，也不能替代 Pi 后台任务自身的存活与唤醒机制。
+
+**验证**：`tests/followup.test.ts` 覆盖通知身份、禁用唤醒和用户输入边界；`tests/followup-bridge.test.ts` 覆盖后台等待、原线程回发、持久化、分页和不确定发送。生产会话时间线只读回放应能识别已知后台通知和最终结果；不依赖平台凭据。
+
+## 9. Slack 已重连但管理页持续显示退避
+
+**现象**：Slack 周期性断开后可恢复收发，管理面 ready/running 却一直为 false，旧 lastError 不消失。
+
+**根因**：Manager 的 start().then 只执行一次；Slack 内部重连 hello 没有再次通报就绪。
+
+**修复**：AdapterContext 增加可选 onReady，Slack 每次成功 hello 都调用。Manager 清除错误并恢复就绪，核对当前 adapter 身份和停止信号；保留无此回调渠道的首次 start 兼容逻辑。已上报 hello 的适配器以回调为准，防止 start 完成覆盖紧随 hello 的断线。
+
+**验证**：Slack fake socket 覆盖重连前/后 hello、旧 generation 和 stop；manager 回归覆盖多轮恢复、替换及停止后的陈旧回调、start 完成竞态。不要用 auth.test 成功代替 Socket Mode 握手成功。
+
+## 10. IM 历史关联列表不应当作当前 agent 目录
+
+**现象**：清理脚本已归档 agent，IM「已关联会话」仍堆积历史线程。
+
+**根因**：会话关联历史独立于 agent 归档，直接列举 state.conversations 不会反映当前目录；closed 与 archived 也不是同一状态。
+
+**修复**：实时查询未归档 agent 目录（含 background，固定 created_at 排序完整分页），与关联 agentId 求交，之后才排序及截取 50 条；聊天候选复用同一目录查询。保留 closed 未归档项，不改写/删除历史 state，不改变路由和归档脚本。目录错误应失败，不可回退展示全部历史。
+
+**验证**：manager/目录测试覆盖已归档、已删除、null 绑定、closed 未归档、分页、重复 cursor、过滤前历史超过 50 条、外部归档后下次查询生效和失败边界。

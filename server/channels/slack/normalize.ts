@@ -19,6 +19,7 @@ import {
 
 export interface NormalizeDeps {
   botUserId: string;
+  botId?: string;
   connectionId: string;
   /** 下载 url_private_download 到 ctx.mediaDir，返回本地路径。 */
   downloadFile: (url: string, file: SlackFile) => Promise<string>;
@@ -41,10 +42,18 @@ export function decodeSlackText(value: string): string {
 }
 
 /** 去掉 <@BOTID>（含 <@BOTID|fallback> 形式）的提及标记。 */
-export function stripBotMention(value: string, botUserId: string): string {
-  if (!botUserId) return value.trim();
-  const escaped = botUserId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return value.replace(new RegExp(`<@${escaped}(?:\\|[^>]*)?>`, "gi"), "").trim();
+export function stripBotMention(value: string, botUserId: string, botId?: string): string {
+  const ids = [botUserId, botId].filter((id): id is string => Boolean(id));
+  if (ids.length === 0) return value.trim();
+  const pattern = ids.map((id) => id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  return value.replace(new RegExp(`<@(?:${pattern})(?:\\|[^>]*)?>`, "gi"), "").trim();
+}
+
+export function hasBotMention(value: string, botUserId: string, botId?: string): boolean {
+  const ids = [botUserId, botId].filter((id): id is string => Boolean(id));
+  if (ids.length === 0) return false;
+  const pattern = ids.map((id) => id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  return new RegExp(`<@(?:${pattern})(?:\\|[^>]*)?>`, "i").test(value);
 }
 
 /** /^[/!][A-Za-z][A-Za-z0-9_-]{0,63}(\s|$)/ —— 与参考实现一致的命令形态。 */
@@ -102,25 +111,38 @@ export async function normalizeEvent(
     event.type === "message" &&
     (event.channel_type === "im" ||
       (event.channel_type === undefined && channel.startsWith("D")));
-  const mentioned = event.type === "app_mention";
-  if (!direct && !mentioned) return null; // channel/group 内非 mention 忽略
+  const rawText = decodeSlackText(event.text ?? "");
+  const mentioned =
+    event.type === "app_mention" ||
+    (event.type === "message" && !direct && hasBotMention(rawText, deps.botUserId, deps.botId));
+  const inThread =
+    event.type === "message" && !direct && Boolean(event.thread_ts);
+  if (!direct && !mentioned && !inThread) return null; // channel/group 内非 mention 且非 thread 忽略
 
   // 机器人自身消息、其他应用（工作流）消息、file_share 之外的子类型均为噪音
   if (event.bot_id || event.app_id) return null;
-  if (user === deps.botUserId) return null;
+  if (user === deps.botUserId || (deps.botId && user === deps.botId)) return null;
   if (event.subtype !== undefined && event.subtype !== "file_share") return null;
 
-  const text = stripBotMention(decodeSlackText(event.text ?? ""), deps.botUserId);
-  const threadTs = event.thread_ts;
-  const threadParentTs = threadTs && threadTs !== ts ? threadTs : undefined;
+  const text = stripBotMention(rawText, deps.botUserId, deps.botId);
+  const kind = direct || channel.startsWith("D") ? "dm" : "group";
+  // 顶层消息（私聊或群聊/频道）若尚未处于 thread 中，则以自身 ts 作为 thread 根，保证回复进 thread 且会话独立
+  const threadTs = event.thread_ts ?? ts;
+  const threadParentTs =
+    event.thread_ts && event.thread_ts !== ts ? event.thread_ts : undefined;
 
   const media = event.files ? await filesToMedia(event.files, deps) : [];
   if (!text && media.length === 0) return null; // 无文本无媒体的噪音不投递
 
+  const replyToBot =
+    Boolean(deps.botUserId) &&
+    Boolean(event.parent_user_id) &&
+    event.parent_user_id === deps.botUserId;
+
   const message: NormalizedMessage = {
     channel: "slack" satisfies ChannelId,
     connectionId: deps.connectionId,
-    kind: direct || channel.startsWith("D") ? "dm" : "group",
+    kind,
     chatId: channel,
     ...(threadTs ? { threadId: threadTs } : {}),
     senderId: user,
@@ -130,7 +152,7 @@ export async function normalizeEvent(
     ...(media.length > 0 ? { media } : {}),
     trigger: {
       mention: direct || mentioned,
-      replyToBot: false,
+      replyToBot,
       command: isCommandLike(text),
     },
   };

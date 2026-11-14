@@ -42,6 +42,19 @@ export const jobSchema = z
       .default(null),
     answer: z.string().max(200_000).nullable().default(null),
     delivery: z.enum(["sending", "done", "uncertain"]).nullable().default(null),
+    // Pi background notifications can start another turn after the original
+    // reply. Only monitor work launched by this exact IM dispatch.
+    followup: z.object({
+      cursor: z.object({ epoch: z.string().max(128), seq: z.number().int() }).strict(),
+      originSeen: z.boolean().default(false),
+      pendingTasks: z.array(z.string().max(256)).max(100).default([]),
+      waitingForReply: z.boolean().default(false),
+      candidate: z.object({ id: z.string().max(256), text: z.string().max(200_000) }).strict().nullable().default(null),
+      lastAnswer: z.string().max(200_000),
+      sending: z.string().max(256).nullable().default(null),
+      uncertain: z.boolean().default(false),
+      expiresAt: z.number().int(),
+    }).strict().nullable().default(null),
     progressMessageId: z.string().max(256).nullable().default(null),
     question: questionSchema.nullable().default(null),
     questionReply: z

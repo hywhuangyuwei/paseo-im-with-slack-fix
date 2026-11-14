@@ -24,6 +24,7 @@ export const slackEventSchema = z.looseObject({
   text: z.string().optional(),
   ts: z.string().optional(),
   thread_ts: z.string().optional(),
+  parent_user_id: z.string().optional(),
   files: z.array(slackFileSchema).optional(),
 });
 export type SlackEvent = z.output<typeof slackEventSchema>;

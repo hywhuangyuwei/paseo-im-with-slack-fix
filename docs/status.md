@@ -16,12 +16,21 @@
 
 会话绑定现状（`connections/<id>/state.json` 的 conversations）：QQ/TG/微信 DM 均指向共同对话 agent（target-agent）。修改去向请走 App「连接详情 → 消息去向」保存——save 时自动把跟随旧 agent 的会话绑定迁移/矫正（gotchas §5.8），无需手动清理。
 
+### 2026-11-14 本机 Slack / IM 管理面修复
+
+- Slack 每次 Socket Mode `hello` 均上报就绪，重连后恢复 ready/running 并清除旧 lastError；旧适配器及停止后的回调不可污染当前连接。
+- IM「已关联会话」及已有聊天候选只展示当前未归档 agent；closed 但未归档的仍保留。目录完整分页，先过滤再截取最近 50 条；仅过滤展示，不删除历史路由状态。
+- 验证：`tests/manager.test.ts` 与 Slack 重连回归；线上重载/RPC 结果见 `docs/webui-acceptance.md`。
+
 ## 2. 缺陷修复索引（实机调试全记录，按主题）
 
 | 主题 | 现象 | 根因 | 细节 |
 | --- | --- | --- | --- |
+| Slack 重连状态卡住 | 已恢复收发仍显示断开/退避 | Manager 只在首次 start 完成后清错，后续 hello 没有状态通知 | gotchas §9 |
+| IM 历史关联过多 | 已归档或无绑定会话继续展示 | 直接列举历史 conversations，未与实时未归档目录求交 | gotchas §10 |
 | Telegram 出站全网失败 | 连接报「网络错误」自动重试，同机 curl 正常 | WSL2 双栈域名 IPv6 路由黑洞，node 拨号卡 v6 不回退 v4 | gotchas §5.5 |
 | 插件重载丢在途回复 | 重载窗口内的 agent 回复静默丢失 | 内存队列蒸发，job 冻结 dispatch null/sent | gotchas §7 |
+| Pi 后台续跑答复未回发 IM | 首次 idle 已回复，后台完成后的最终答复丢失 | 旧桥接只追踪首轮，无后台续跑关联 | gotchas §8 |
 | 微信配对无二维码 | 点击扫码配对无响应/白卡 | qrUrl 是 text/html 落地页 + pollLogin 30s 阻塞 + configure 鸡生蛋死锁 | gotchas §5.7 |
 | 凭证输入无显示/切换 | 手机端无眼睛按钮 | labelAccessory 仅 web host 渲染 | gotchas §5.6 |
 | 改去向不生效 | 换新 agent 后消息仍进旧会话 | 会话绑定压过 target + save 双实例竞态回滚 | gotchas §5.8 |

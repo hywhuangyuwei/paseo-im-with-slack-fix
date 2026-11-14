@@ -252,6 +252,7 @@ test("normalize：私聊 message（channel_type=im）解码实体并标记 menti
   assert.equal(result.eventId, "Ev1");
   assert.equal(result.message.kind, "dm");
   assert.equal(result.message.chatId, "D0DIRECT");
+  assert.equal(result.message.threadId, "1700000000.123456");
   assert.equal(result.message.senderId, "UHUMAN");
   assert.equal(result.message.messageId, "1700000000.123456");
   assert.equal(result.message.timestamp, 1_700_000_000_123);
@@ -493,10 +494,196 @@ test("decodeSlackText：单遍解码，&amp;lt; 不二次解码", () => {
 test("configure：必填校验、trim 与机密拆分", () => {
   const fields = definition.configure({ botToken: " xoxb-abc ", appToken: "xapp-xyz " });
   assert.deepEqual(fields.secrets, { botToken: "xoxb-abc", appToken: "xapp-xyz" });
-  assert.deepEqual(fields.config, {});
+  assert.deepEqual(fields.config, { teamId: "__pending__", botUserId: "__pending__" });
   assert.throws(() => definition.configure({ botToken: "xoxb-abc" }), /缺少必填字段/);
   assert.throws(() => definition.configure({ botToken: "oops", appToken: "xapp-xyz" }), /xoxb-/);
   assert.throws(() => definition.configure({ botToken: "xoxb-abc", appToken: "xoxb-wrong" }), /xapp-/);
+});
+
+test("Channel thread：顶层 @bot 自动开启 thread，后续在同 thread 内不 @bot 也能持续对话", async () => {
+  const harness = makeHarness();
+  const socket = new FakeSocket();
+  // 父消息模拟为用户自己发起的顶层消息（user=UHUMAN），验证依赖 activeThreads 仍能标记 replyToBot=true
+  const { rest } = fakeRest(
+    defaultRestHandler({
+      "conversations.history": (call) => ({
+        ok: true,
+        messages: [{ ts: String(call.body.oldest), user: "UHUMAN", text: "<@UBOT01> 开启线程" }],
+      }),
+    }),
+  );
+  let adapter: SlackAdapter | undefined;
+  try {
+    adapter = createAdapter(harness.ctx, {
+      rest,
+      openSocket: () => socket,
+      downloadFile: async () => "",
+      uploadBytes: async () => ({ status: 200 }),
+    });
+    await startWithSocket(adapter, socket);
+
+    // 1. 频道顶层 @bot（无 thread_ts）→ 自动将自身 ts 作为 threadId
+    socket.emitJson({
+      type: "events_api",
+      envelope_id: "env-t1",
+      payload: appMentionPayload({
+        event_id: "EvThreadRoot",
+        text: "<@UBOT01> 开启线程",
+        ts: "1700000100.000100",
+      }),
+    });
+    await waitFor(() => harness.emitted.length === 1);
+    const firstMsg = harness.emitted[0] as { threadId?: string; trigger: { mention: boolean; replyToBot: boolean } };
+    assert.equal(firstMsg.threadId, "1700000100.000100");
+    assert.equal(firstMsg.trigger.mention, true);
+
+    // 2. 在该 thread 内直接发普通 message（不带 <@UBOT01>）→ 识别为已激活 thread，replyToBot=true
+    socket.emitJson({
+      type: "events_api",
+      envelope_id: "env-t2",
+      payload: {
+        type: "event_callback",
+        event_id: "EvThreadFollowUp",
+        api_app_id: "A0TEST01",
+        event: {
+          type: "message",
+          channel: "C0CHANNEL",
+          channel_type: "channel",
+          user: "UHUMAN",
+          text: "那本机 IP 地址呢？",
+          ts: "1700000105.000200",
+          thread_ts: "1700000100.000100",
+        },
+      },
+    });
+    await waitFor(() => harness.emitted.length === 2);
+    const followUp = harness.emitted[1] as {
+      threadId?: string;
+      text?: string;
+      trigger: { mention: boolean; replyToBot: boolean };
+    };
+    assert.equal(followUp.threadId, "1700000100.000100");
+    assert.equal(followUp.text, "那本机 IP 地址呢？");
+    assert.equal(followUp.trigger.mention, false);
+    assert.equal(followUp.trigger.replyToBot, true);
+  } finally {
+    await adapter?.stop();
+    harness.cleanup();
+  }
+});
+
+test("DM thread：私聊直接发送顶层消息自动开启新 thread，thread 内续聊复用同 threadId，再发顶层消息开启独立新 thread", async () => {
+  const harness = makeHarness();
+  const socket = new FakeSocket();
+  const { rest } = fakeRest(
+    defaultRestHandler({
+      "conversations.history": (call) => ({
+        ok: true,
+        messages: [{ ts: String(call.body.oldest), user: "UHUMAN", text: "第一句话开启对话" }],
+      }),
+    }),
+  );
+  let adapter: SlackAdapter | undefined;
+  try {
+    adapter = createAdapter(harness.ctx, {
+      rest,
+      openSocket: () => socket,
+      downloadFile: async () => "",
+      uploadBytes: async () => ({ status: 200 }),
+    });
+    await startWithSocket(adapter, socket);
+
+    // 1. 私聊直接发送第一句顶层消息（无需 @bot，无 thread_ts）→ 自动将自身 ts 作为 threadId
+    socket.emitJson({
+      type: "events_api",
+      envelope_id: "env-dm1",
+      payload: {
+        type: "event_callback",
+        event_id: "EvDmRoot1",
+        api_app_id: "A0TEST01",
+        event: {
+          type: "message",
+          channel: "D0DIRECT",
+          channel_type: "im",
+          user: "UHUMAN",
+          text: "第一句话开启对话",
+          ts: "1700000200.000100",
+        },
+      },
+    });
+    await waitFor(() => harness.emitted.length === 1);
+    const dmRoot1 = harness.emitted[0] as {
+      kind: string;
+      chatId: string;
+      threadId?: string;
+      trigger: { mention: boolean; replyToBot: boolean };
+    };
+    assert.equal(dmRoot1.kind, "dm");
+    assert.equal(dmRoot1.chatId, "D0DIRECT");
+    assert.equal(dmRoot1.threadId, "1700000200.000100");
+    assert.equal(dmRoot1.trigger.mention, true);
+
+    // 2. 在该私聊 thread 内继续回复 → 保持同一 threadId（对应同一 Paseo 会话）
+    socket.emitJson({
+      type: "events_api",
+      envelope_id: "env-dm2",
+      payload: {
+        type: "event_callback",
+        event_id: "EvDmFollowUp1",
+        api_app_id: "A0TEST01",
+        event: {
+          type: "message",
+          channel: "D0DIRECT",
+          channel_type: "im",
+          user: "UHUMAN",
+          text: "在这个 thread 里追问一句",
+          ts: "1700000205.000200",
+          thread_ts: "1700000200.000100",
+        },
+      },
+    });
+    await waitFor(() => harness.emitted.length === 2);
+    const dmFollowUp = harness.emitted[1] as {
+      kind: string;
+      threadId?: string;
+      trigger: { mention: boolean; replyToBot: boolean };
+    };
+    assert.equal(dmFollowUp.kind, "dm");
+    assert.equal(dmFollowUp.threadId, "1700000200.000100");
+    assert.equal(dmFollowUp.trigger.mention, true);
+    assert.equal(dmFollowUp.trigger.replyToBot, true);
+
+    // 3. 在私聊主界面再发一句新的顶层消息（无 thread_ts）→ 开启新的 threadId（对应全新 Paseo 会话）
+    socket.emitJson({
+      type: "events_api",
+      envelope_id: "env-dm3",
+      payload: {
+        type: "event_callback",
+        event_id: "EvDmRoot2",
+        api_app_id: "A0TEST01",
+        event: {
+          type: "message",
+          channel: "D0DIRECT",
+          channel_type: "im",
+          user: "UHUMAN",
+          text: "另起一句话开启新话题",
+          ts: "1700000300.000100",
+        },
+      },
+    });
+    await waitFor(() => harness.emitted.length === 3);
+    const dmRoot2 = harness.emitted[2] as {
+      kind: string;
+      threadId?: string;
+      trigger: { mention: boolean; replyToBot: boolean };
+    };
+    assert.equal(dmRoot2.kind, "dm");
+    assert.equal(dmRoot2.threadId, "1700000300.000100");
+    assert.notEqual(dmRoot2.threadId, dmRoot1.threadId);
+  } finally {
+    await adapter?.stop();
+    harness.cleanup();
+  }
 });
 
 test("start：缺失/格式错误的凭据给出可执行中文提示", async () => {
@@ -665,10 +852,12 @@ test("Socket Mode：hello 就绪、ACK、事件投递、replyToBot、去重持�
   }
 });
 
-test("Socket Mode：断开后按退避重连并恢复收发", async () => {
+test("Socket Mode：断开后按退避重连，收到 hello 才重新报告就绪并恢复收发", async () => {
   const harness = makeHarness();
+  let readyCount = 0;
+  harness.ctx.onReady = () => { readyCount++; };
   const socket1 = new FakeSocket();
-  const socket2 = helloSocket();
+  const socket2 = new FakeSocket();
   const sockets = [socket1, socket2];
   const { calls, rest } = fakeRest(defaultRestHandler());
   let adapter: SlackAdapter | undefined;
@@ -680,11 +869,18 @@ test("Socket Mode：断开后按退避重连并恢复收发", async () => {
       uploadBytes: async () => ({ status: 200 }),
     });
     await startWithSocket(adapter, socket1);
+    assert.equal(readyCount, 1);
 
     socket1.emit("close", { code: 1006 });
     await waitFor(() => harness.errors.length >= 1);
     await waitFor(() => calls.filter((call) => call.method === "apps.connections.open").length >= 2, 5_000);
-    // sock2 由 helloSocket 自动 hello；就绪后再次可收事件
+    await waitFor(() => socket2.listenerCount("message") > 0);
+    assert.equal(readyCount, 1, "openSocket is not a successful handshake");
+    socket1.emitJson({ type: "hello" });
+    assert.equal(readyCount, 1, "ignore hello from the old generation");
+    socket2.emitJson({ type: "hello" });
+    assert.equal(readyCount, 2);
+    // 重连 hello 后再次可收事件
     socket2.emitJson({
       type: "events_api",
       envelope_id: "env10",
@@ -692,6 +888,9 @@ test("Socket Mode：断开后按退避重连并恢复收发", async () => {
     });
     await waitFor(() => harness.emitted.length === 1);
     assert.ok(harness.emitted.length === 1);
+    await adapter.stop();
+    socket2.emitJson({ type: "hello" });
+    assert.equal(readyCount, 2, "stopped adapters must not report readiness");
   } finally {
     await adapter?.stop();
     harness.cleanup();
@@ -853,6 +1052,25 @@ test("stream：startStream 非瞬时错误（invalid_auth）仍上抛且不走�
     const adapter = createAdapter(harness.ctx, { ...stubDeps(harness.ctx), rest });
     await assert.rejects(() => adapter.streamStart("C0CHANNEL"), /invalid_auth/);
     assert.equal(calls.filter((call) => call.method === "chat.postMessage").length, 0);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("stream：非前缀状态刷新（⏳ 4s → ⏳ 8s）自动收口原生流并原位 chat.update，不漏帧", async () => {
+  const harness = makeHarness();
+  try {
+    const { calls, rest } = fakeRest(defaultRestHandler());
+    const adapter = createAdapter(harness.ctx, { ...stubDeps(harness.ctx), rest });
+    const { streamId } = await adapter.streamStart("D0DIRECT", "1700000000.000100");
+    await adapter.streamAppend(streamId, "⏳ 4s · 正在思考…");
+    await adapter.streamAppend(streamId, "⏳ 8s · 正在执行 bash…");
+    await adapter.streamFinish(streamId, "最终回答");
+    const updates = calls.filter((call) => call.method === "chat.update");
+    assert.equal(updates.length, 2);
+    assert.equal(updates[0]?.body.text, "⏳ 8s · 正在执行 bash…");
+    assert.equal(updates[1]?.body.text, "最终回答");
+    assert.equal(calls.filter((call) => call.method === "chat.stopStream").length, 1);
   } finally {
     harness.cleanup();
   }

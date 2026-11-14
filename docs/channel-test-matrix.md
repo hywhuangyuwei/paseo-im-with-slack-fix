@@ -27,7 +27,7 @@ A✅ B✅（退避/409 终止/stop）C✅（批量去重入库+媒体落盘+call
 **缺口**：sendPhoto/sendDocument multipart 独立断言；sendChatAction；setMyCommands 失败仅告警路径；isAdmin/leaveChat。
 
 ### slack（30 用例）
-A✅ B✅（退避/断线重连恢复）C✅（过滤/replyToBot/去重落盘）D✅（mrkdwn/fence/thread_ts/messageId/三步上传/markdown 回退/editMessage not_modified）E✅（startStream→append→stop + 回退）F— G— H✅ I✅（429/invalid_auth）J✅（mrkdwn 转换/chunks）
+A✅ B✅（退避/断线重连恢复；每次 hello 上报就绪、旧 generation/stop 不再上报，Manager 清错与 start 竞态回归）C✅（过滤/replyToBot/去重落盘）D✅（mrkdwn/fence/thread_ts/messageId/三步上传/markdown 回退/editMessage not_modified）E✅（startStream→append→stop + 回退）F— G— H✅ I✅（429/invalid_auth）J✅（mrkdwn 转换/chunks）
 **缺口**：interactive envelope 只 ACK 分支；completeUploadExternal 失败分支。
 
 ### discord（42 用例）

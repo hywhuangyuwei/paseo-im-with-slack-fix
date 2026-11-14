@@ -3,6 +3,7 @@
  * Protocol facts ported from xmanrui/dsh-im (MIT). */
 
 const FENCE_OPEN = /^[ \t]*(`{3,}|~{3,})/;
+const HEADING_LINE = /^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*#*$/;
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -44,6 +45,11 @@ export function toMrkdwn(text: string): string {
         return line; // 围栏行本身与其内部内容保持原样
       }
       if (fence) return line;
+      const heading = HEADING_LINE.exec(line);
+      if (heading) {
+        const inner = transformInline(heading[1].trim()).replace(/^\*+|\*+$/g, "");
+        return inner ? `*${inner}*` : line;
+      }
       return transformInline(line);
     })
     .join("\n");

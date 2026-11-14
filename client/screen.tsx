@@ -504,7 +504,7 @@ function ConnectionDetail({
       ) : null}
 
       {view.conversations.length ? (
-        <SettingsSection title="已关联会话">
+        <SettingsSection title="当前关联会话">
           <SettingsCard>
             {view.conversations.map((conversation) => (
               <SettingsRow

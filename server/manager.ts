@@ -21,6 +21,7 @@ import { migrateBindingTargets, Router } from "./routing.ts";
 import { StateStore } from "./state-store.ts";
 import { CHANNEL_DEFINITIONS } from "./channels/registry.ts";
 import { mapProviderChoices } from "./choices.ts";
+import { listUnarchivedAgents } from "./agent-directory.ts";
 import { connectionRoot, dataRoot } from "./paths.ts";
 
 export interface ConnectInput {
@@ -33,6 +34,7 @@ interface ActiveConnection {
   adapter: ChannelAdapter;
   bridge: Bridge;
   state: StateStore;
+  followups: DeferredRegistry;
   startTask: Promise<void>;
 }
 
@@ -382,7 +384,24 @@ export class Manager {
     await state.load();
     const secrets = (await this.secrets.read(connection.id)) ?? {};
     let adapter: ChannelAdapter | null = null;
-    const bridge = new Bridge(
+    let bridge!: Bridge;
+    let lastFollowupError = 0;
+    const followups = new DeferredRegistry({
+      intervalMs: 5_000,
+      sweep: async (id) => {
+        try {
+          return await bridge.resumeFollowup(id);
+        } catch (error) {
+          if (this.controller.signal.aborted) return true;
+          if (Date.now() - lastFollowupError >= 60_000) {
+            lastFollowupError = Date.now();
+            this.makeLogger(connection)("warn", `后台续跑检查失败，稍后重试：${(error as Error).message}`);
+          }
+          return false;
+        }
+      },
+    });
+    bridge = new Bridge(
       {
         connectionId: connection.id,
         config: () => this.registry.get(connection.id) ?? connection,
@@ -395,12 +414,15 @@ export class Manager {
         daemon: () => this.daemon(),
         settings: () => this.settings(),
         deferred: { track: (id) => this.deferred.track(id), resolve: (id) => this.deferred.resolve(id) },
+        followups: { track: (id) => followups.track(id) },
         signal: this.controller.signal,
         log: (level, message) =>
           console[level === "info" ? "log" : level](`[paseo-im ${connection.channel}/${connection.name}] ${message}`),
       },
       new Router(() => this.daemon(), this.makeLogger(connection)),
     );
+    let reportsReadiness = false;
+    const isCurrent = () => !this.controller.signal.aborted && this.active.get(connection.id)?.adapter === adapter;
     const context: AdapterContext = {
       connectionId: connection.id,
       config: connection,
@@ -417,7 +439,14 @@ export class Manager {
         });
       },
       onGroups: (events) => void this.onGroupEvents(connection.id, events),
+      onReady: () => {
+        if (!isCurrent()) return;
+        reportsReadiness = true;
+        this.ready.add(connection.id);
+        this.errors.delete(connection.id);
+      },
       onError: (error) => {
+        if (!isCurrent()) return;
         this.errors.set(connection.id, error.message);
         this.ready.delete(connection.id);
         console.error(`[paseo-im ${connection.channel}/${connection.name}] ${error.message}`);
@@ -427,16 +456,25 @@ export class Manager {
       },
     };
     adapter = definition.create(context);
-    const entry: ActiveConnection = { adapter, bridge, state, startTask: Promise.resolve() };
+    const entry: ActiveConnection = { adapter, bridge, state, followups, startTask: Promise.resolve() };
     this.active.set(connection.id, entry);
     this.resumeOrphanJobs(connection, entry);
     entry.startTask = adapter
       .start()
       .then(() => {
-        this.ready.add(connection.id);
-        this.errors.delete(connection.id);
+        if (!isCurrent()) return;
+        // Legacy adapters report initial readiness through start(); adapters
+        // with onReady own their status, including close-before-start races.
+        if (!reportsReadiness) {
+          this.ready.add(connection.id);
+          this.errors.delete(connection.id);
+        }
+        for (const job of Object.values(state.get().jobs)) {
+          if (job.delivery === "done" && job.followup && !job.followup.uncertain) followups.track(job.messageId);
+        }
       })
       .catch((error) => {
+        if (!isCurrent()) return;
         this.errors.set(connection.id, (error as Error).message);
         this.ready.delete(connection.id);
         console.error(`[paseo-im ${connection.channel}/${connection.name}] 启动失败：${(error as Error).message}`);
@@ -464,6 +502,7 @@ export class Manager {
     if (!entry) return;
     this.active.delete(id);
     this.ready.delete(id);
+    entry.followups.stop();
     await entry.adapter.stop().catch(() => {});
     // adapter 停止后再排空写链：调用方（manager.stop/重载/测试清理）随后才可
     // 安全删除数据目录，同时避免重载截断最后一次 updateJob 持久化。
@@ -511,11 +550,14 @@ export class Manager {
 
   async list(): Promise<{ channels: { channel: ChannelId; connections: ConnectionView[] }[] }> {
     const views: Partial<Record<ChannelId, ConnectionView[]>> = {};
+    const agents = this.active.size ? await listUnarchivedAgents(await this.daemon()) : [];
+    const agentIds = new Set(agents.map(agent => agent.id));
     for (const connection of this.registry.list()) {
       const entry = this.active.get(connection.id);
       const state = entry?.state ?? null;
       const jobs = state?.get().jobs ?? {};
       const conversations = Object.entries(state?.get().conversations ?? {})
+        .filter(([, value]) => value.agentId !== null && agentIds.has(value.agentId))
         .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
         .slice(0, 50)
         .map(([key, value]) => ({
@@ -563,19 +605,16 @@ export class Manager {
   }> {
     const api = await this.daemon();
     const [agentList, workspaceList, providerSnapshot] = await Promise.all([
-      api.agents.list().catch(() => null),
+      listUnarchivedAgents(api),
       api.workspaces.list().catch(() => null),
       api.providers.snapshot().catch(() => null),
     ]);
-    const agentEntries = agentList?.entries ?? [];
+    const agentEntries = agentList;
     const workspaceEntries = workspaceList?.entries ?? [];
     const providerEntries = (providerSnapshot as { entries?: unknown[] } | null)?.entries ?? [];
     const mappedProviders = mapProviderChoices(providerEntries);
     return {
-      agents: agentEntries.map((entry) => {
-        const agent = (entry as { agent: { id: string; title?: string | null } }).agent;
-        return { id: agent.id, title: agent.title ?? agent.id };
-      }),
+      agents: agentEntries.map(agent => ({ id: agent.id, title: agent.title ?? agent.id })),
       workspaces: workspaceEntries.map((entry) => {
         const workspace = entry as { id: string; name?: string | null };
         return { id: workspace.id, name: workspace.name ?? workspace.id };

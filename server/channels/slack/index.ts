@@ -50,6 +50,7 @@ import {
   type SlackRestResponse,
 } from "./schema.ts";
 import {
+  ACTIVE_THREAD_CAP,
   loadSlackState,
   OWN_MESSAGE_CAP,
   saveSlackState,
@@ -75,12 +76,17 @@ const STREAM_UNAVAILABLE_CODES = [
   "missing_scope",
   "feature_not_enabled",
   "not_allowed",
+  "invalid_thread_ts",
+  "missing_argument",
+  "invalid_arguments",
+  "missing_recipient_team_id",
+  "missing_recipient_user_id",
 ];
 /** markdown 渲染被 Slack 拒绝的 provider code → 重发纯文本。 */
 const MARKDOWN_REJECTION_CODES = ["invalid_blocks", "invalid_blocks_format", "invalid_markdown"];
 
 const SLACK_CAPABILITIES: ChannelCapabilities = {
-  progress: "stream",
+  progress: "edit",
   markdown: "custom",
   uploadImage: true,
   uploadFile: true,
@@ -135,7 +141,7 @@ export class SlackAdapter implements ChannelAdapter {
   readonly #abort = new AbortController();
   readonly #signal: AbortSignal;
   readonly #stateChain = new WriteChain();
-  #state: SlackState = { seenEventIds: [], ownMessageTs: [] };
+  #state: SlackState = { seenEventIds: [], ownMessageTs: [], activeThreads: [] };
   #generation = 0;
   #stopped = false;
   #started = false;
@@ -143,12 +149,17 @@ export class SlackAdapter implements ChannelAdapter {
   #appId: string | null = null;
   #ready = deferred<void>();
   #stoppedGate = deferred<void>();
+  #teamId = "";
+  #botUserId = "";
+  #botId = "";
   #streams = new Map<string, ActiveStream>();
 
   constructor(ctx: AdapterContext<SlackConnection>, deps: SlackDeps) {
     this.#ctx = ctx;
     this.#deps = deps;
     this.#signal = AbortSignal.any([ctx.signal, this.#abort.signal]);
+    this.#teamId = ctx.config.teamId;
+    this.#botUserId = ctx.config.botUserId;
   }
 
   async start(): Promise<void> {
@@ -220,10 +231,21 @@ export class SlackAdapter implements ChannelAdapter {
         const identity = await this.#deps.rest("auth.test", {});
         const teamId = asText(identity.team_id);
         const userId = asText(identity.user_id);
+        const botId = asText(identity.bot_id) ?? "";
         if (!teamId || !userId) {
           throw new UserFacingError(
             "Slack auth.test 没有返回 team_id/user_id，请确认填写的是 Bot User OAuth Token（xoxb-）。",
           );
+        }
+        if (
+          this.#ctx.config.teamId === "__pending__" ||
+          this.#ctx.config.botUserId === "__pending__"
+        ) {
+          this.#teamId = teamId;
+          this.#botUserId = userId;
+          this.#botId = botId;
+          await this.#ctx.updateConfig?.({ teamId, botUserId: userId });
+          return;
         }
         if (teamId !== this.#ctx.config.teamId || userId !== this.#ctx.config.botUserId) {
           throw new UserFacingError(
@@ -231,6 +253,9 @@ export class SlackAdapter implements ChannelAdapter {
               `连接配置为 teamId=${this.#ctx.config.teamId} botUserId=${this.#ctx.config.botUserId}，请用该 Token 重新创建连接。`,
           );
         }
+        this.#teamId = teamId;
+        this.#botUserId = userId;
+        this.#botId = botId;
         return;
       } catch (error) {
         if (this.#isStopped() || error instanceof UserFacingError) throw error;
@@ -342,6 +367,7 @@ export class SlackAdapter implements ChannelAdapter {
       if (envelope.type === "hello") {
         this.#appId = envelope.connection_info?.app_id ?? null;
         lifecycle.markHello();
+        this.#ctx.onReady?.();
         ready.resolve();
         return;
       }
@@ -399,7 +425,8 @@ export class SlackAdapter implements ChannelAdapter {
     if (!eventId || this.#alreadySeen(eventId)) return;
 
     const normalized = await normalizeEvent(parsed.data, {
-      botUserId: this.#ctx.config.botUserId,
+      botUserId: this.#botUserId,
+      ...(this.#botId ? { botId: this.#botId } : {}),
       connectionId: this.#ctx.connectionId,
       downloadFile: (url, file) => this.#deps.downloadFile(url, file),
       logWarn: (message) => this.#ctx.log("warn", message),
@@ -407,13 +434,24 @@ export class SlackAdapter implements ChannelAdapter {
     if (!normalized) return;
 
     const message = normalized.message;
+    // Slack 对频道内含 @bot 的消息可能同时推送 app_mention 与 message 两个不同 event_id 的事件，按消息坐标二次去重
+    const messageKey = `msg:${message.chatId}:${message.messageId}`;
+    if (eventId !== message.messageId && this.#alreadySeen(messageKey)) return;
+
     if (normalized.threadParentTs) {
       await this.#applyThreadParent(message, normalized.threadParentTs);
+    }
+    if (
+      message.threadId &&
+      (message.trigger.mention || message.trigger.replyToBot)
+    ) {
+      this.#rememberThread(message.chatId, message.threadId);
     }
     this.#ctx.onMessage(message);
   }
 
   async #applyThreadParent(message: NormalizedMessage, parentTs: string): Promise<void> {
+    const activeThread = this.#isActiveThread(message.chatId, parentTs);
     let parent: { ts?: string; user?: string; bot_id?: string; text?: string } | undefined;
     try {
       const history = slackHistorySchema.parse(
@@ -437,9 +475,16 @@ export class SlackAdapter implements ChannelAdapter {
         ...(parent.user ? { sender: parent.user } : {}),
       };
       message.trigger.replyToBot =
-        parent.user === this.#ctx.config.botUserId || Boolean(parent.bot_id);
+        Boolean(message.trigger.replyToBot) ||
+        activeThread ||
+        this.isOwnMessage(parentTs) ||
+        parent.user === this.#botUserId ||
+        Boolean(parent.bot_id);
     } else {
-      message.trigger.replyToBot = this.isOwnMessage(parentTs);
+      message.trigger.replyToBot =
+        Boolean(message.trigger.replyToBot) ||
+        activeThread ||
+        this.isOwnMessage(parentTs);
     }
   }
 
@@ -447,7 +492,7 @@ export class SlackAdapter implements ChannelAdapter {
     const threadTs = outbound.threadId ?? outbound.replyToId;
     const source = outbound.text ?? "";
     if (!source.trim()) return {};
-    const chunks = splitMrkdwnChunks(toMrkdwn(source), MAX_CHUNK_CHARS);
+    const chunks = splitMrkdwnChunks(source, MAX_CHUNK_CHARS);
     let messageId: string | undefined;
     for (const chunk of chunks) {
       const id = await this.#postMessage(outbound.chatId, threadTs, chunk);
@@ -456,14 +501,16 @@ export class SlackAdapter implements ChannelAdapter {
         this.#rememberOwn(id);
       }
     }
+    if (threadTs) this.#rememberThread(outbound.chatId, threadTs);
     return messageId ? { messageId } : {};
   }
 
   async #postMessage(
     chatId: string,
     threadTs: string | undefined,
-    text: string,
+    rawText: string,
   ): Promise<string | undefined> {
+    const mrkdwnText = toMrkdwn(rawText);
     const base = {
       channel: chatId,
       mrkdwn: true,
@@ -474,15 +521,20 @@ export class SlackAdapter implements ChannelAdapter {
     };
     let result: SlackRestResponse;
     try {
-      result = await this.#deps.rest("chat.postMessage", { ...base, text });
+      result = await this.#deps.rest("chat.postMessage", {
+        ...base,
+        text: mrkdwnText,
+        blocks: [{ type: "markdown", text: rawText }],
+      });
     } catch (error) {
       if (error instanceof SlackApiError && MARKDOWN_REJECTION_CODES.includes(error.providerCode)) {
         // markdown 被拒：按纯文本原样重发这一块
-        result = await this.#deps.rest("chat.postMessage", { ...base, text: toPlain(text) });
+        result = await this.#deps.rest("chat.postMessage", { ...base, text: toPlain(rawText) });
       } else {
         throw this.#sendError(error);
       }
     }
+    if (threadTs) this.#rememberThread(chatId, threadTs);
     const ts = asText(result.ts);
     if (ts) return ts;
     const message = result.message;
@@ -535,10 +587,11 @@ export class SlackAdapter implements ChannelAdapter {
   }
 
   async editMessage(messageId: string, chatId: string, text: string): Promise<void> {
-    await this.#updateMessage(messageId, chatId, toMrkdwn(text));
+    await this.#updateMessage(messageId, chatId, text);
   }
 
   async streamStart(chatId: string, threadId?: string): Promise<{ streamId: string }> {
+    if (threadId) this.#rememberThread(chatId, threadId);
     try {
       const started = await this.#deps.rest("chat.startStream", {
         channel: chatId,
@@ -559,6 +612,7 @@ export class SlackAdapter implements ChannelAdapter {
         // （参照 feishu broken 降级），不让投递链路炸掉。
         const placeholderTs = await this.#postMessage(chatId, threadId, STREAM_PLACEHOLDER);
         if (!placeholderTs) throw error;
+        this.#rememberOwn(placeholderTs);
         this.#streams.set(placeholderTs, {
           channel: chatId,
           threadId,
@@ -575,14 +629,18 @@ export class SlackAdapter implements ChannelAdapter {
   async streamAppend(streamId: string, text: string): Promise<void> {
     const stream = this.#streams.get(streamId);
     if (!stream) throw new Error("Slack 流式消息不存在或已结束");
-    const mrkdwn = toMrkdwn(text ?? "");
+    const raw = text ?? "";
+    const mrkdwn = toMrkdwn(raw);
     if (stream.fallback || stream.broken) {
-      await this.#updateMessage(streamId, stream.channel, mrkdwn);
+      await this.#updateMessage(streamId, stream.channel, raw);
       return;
     }
     if (stream.appended && !mrkdwn.startsWith(stream.appended)) {
-      // 文本被收缩/重写：无法增量，留给 finish 用 chat.update 修正
+      // 文本被收缩/重写：先结束原生流，再直接用 chat.update 原位更新本次文本
       stream.broken = true;
+      stream.fallback = true;
+      await this.#stopStreamQuiet(streamId, stream.channel);
+      await this.#updateMessage(streamId, stream.channel, raw);
       return;
     }
     const delta = mrkdwn.slice(stream.appended.length);
@@ -592,6 +650,9 @@ export class SlackAdapter implements ChannelAdapter {
     } catch (error) {
       if (error instanceof SlackApiError) {
         stream.broken = true;
+        stream.fallback = true;
+        await this.#stopStreamQuiet(streamId, stream.channel);
+        await this.#updateMessage(streamId, stream.channel, raw);
         return;
       }
       throw error;
@@ -604,15 +665,18 @@ export class SlackAdapter implements ChannelAdapter {
     if (!stream) throw new Error("Slack 流式消息不存在或已结束");
     this.#streams.delete(streamId);
 
-    const source = toMrkdwn(text ?? "");
-    const chunks = splitMrkdwnChunks(source.trim() ? source : STREAM_PLACEHOLDER, MAX_CHUNK_CHARS);
-    const first = chunks[0];
-    const restChunks = chunks.slice(1);
+    const rawSource = (text ?? "").trim() ? (text ?? "") : STREAM_PLACEHOLDER;
+    const rawChunks = splitMrkdwnChunks(rawSource, MAX_CHUNK_CHARS);
+    const rawFirst = rawChunks[0];
+    const first = toMrkdwn(rawFirst);
+    const restChunks = rawChunks.slice(1);
 
     if (stream.fallback || stream.broken || !first.startsWith(stream.appended)) {
       // 流式不可用/中断/前缀不一致：终止流并整体覆写
-      await this.#stopStreamQuiet(streamId, stream.channel);
-      await this.#updateMessage(streamId, stream.channel, first);
+      if (!stream.fallback) {
+        await this.#stopStreamQuiet(streamId, stream.channel);
+      }
+      await this.#updateMessage(streamId, stream.channel, rawFirst);
     } else {
       // stopStream 的 markdown_text 为最终文本（含未 append 的增量）
       try {
@@ -623,11 +687,14 @@ export class SlackAdapter implements ChannelAdapter {
         });
       } catch {
         await this.#stopStreamQuiet(streamId, stream.channel);
-        await this.#updateMessage(streamId, stream.channel, first);
+        await this.#updateMessage(streamId, stream.channel, rawFirst);
       }
     }
+    this.#rememberOwn(streamId);
+    if (stream.threadId) this.#rememberThread(stream.channel, stream.threadId);
     for (const chunk of restChunks) {
-      await this.#postMessage(stream.channel, stream.threadId, chunk);
+      const id = await this.#postMessage(stream.channel, stream.threadId, chunk);
+      if (id) this.#rememberOwn(id);
     }
     return { messageId: streamId };
   }
@@ -666,17 +733,35 @@ export class SlackAdapter implements ChannelAdapter {
     }
   }
 
-  async #updateMessage(messageId: string, chatId: string, text: string): Promise<void> {
+  async #updateMessage(messageId: string, chatId: string, rawText: string): Promise<void> {
+    const normalizedRaw = rawText.trim() ? rawText : STREAM_PLACEHOLDER;
+    const mrkdwnText = toMrkdwn(normalizedRaw).trim() || STREAM_PLACEHOLDER;
     try {
       await this.#deps.rest("chat.update", {
         channel: chatId,
         ts: messageId,
-        text: text.trim() ? text : STREAM_PLACEHOLDER,
+        text: mrkdwnText,
+        blocks: [{ type: "markdown", text: normalizedRaw }],
         link_names: false,
       });
     } catch (error) {
       // 进度刷新常写入相同文本，未变化不算失败
       if (error instanceof SlackApiError && error.providerCode === "message_not_modified") return;
+      if (error instanceof SlackApiError && MARKDOWN_REJECTION_CODES.includes(error.providerCode)) {
+        try {
+          await this.#deps.rest("chat.update", {
+            channel: chatId,
+            ts: messageId,
+            text: toPlain(normalizedRaw).trim() || STREAM_PLACEHOLDER,
+            blocks: [],
+            link_names: false,
+          });
+          return;
+        } catch (retryError) {
+          if (retryError instanceof SlackApiError && retryError.providerCode === "message_not_modified") return;
+          throw this.#sendError(retryError);
+        }
+      }
       throw this.#sendError(error);
     }
   }
@@ -685,6 +770,9 @@ export class SlackAdapter implements ChannelAdapter {
     try {
       await this.#deps.rest("chat.stopStream", { channel, ts: streamId });
     } catch (error) {
+      if (error instanceof SlackApiError && error.providerCode === "message_not_in_streaming_state") {
+        return;
+      }
       this.#ctx.log("warn", `Slack 终止流式消息失败：${(error as Error).message}`);
     }
   }
@@ -717,6 +805,27 @@ export class SlackAdapter implements ChannelAdapter {
     this.#state.ownMessageTs.push(messageId);
     if (this.#state.ownMessageTs.length > OWN_MESSAGE_CAP) {
       this.#state.ownMessageTs.splice(0, this.#state.ownMessageTs.length - OWN_MESSAGE_CAP);
+    }
+    this.#persistState();
+  }
+
+  #threadKey(chatId: string, threadTs: string): string {
+    return `${chatId}:${threadTs}`;
+  }
+
+  #isActiveThread(chatId: string, threadTs: string): boolean {
+    const list = this.#state.activeThreads ?? [];
+    return list.includes(this.#threadKey(chatId, threadTs)) || list.includes(threadTs);
+  }
+
+  #rememberThread(chatId: string, threadTs: string): void {
+    if (!chatId || !threadTs) return;
+    const key = this.#threadKey(chatId, threadTs);
+    const list = (this.#state.activeThreads ??= []);
+    if (list.includes(key)) return;
+    list.push(key);
+    if (list.length > ACTIVE_THREAD_CAP) {
+      list.splice(0, list.length - ACTIVE_THREAD_CAP);
     }
     this.#persistState();
   }
@@ -801,7 +910,15 @@ function configureSlack(fields: Record<string, string>): ConfiguredFields {
       "Slack App Token 应以 xapp- 开头，请到应用后台 Basic Information → App-Level Tokens 生成（需勾选 connections:write）。",
     );
   }
-  return defaultConfigure("slack", fields);
+  const { config, secrets } = defaultConfigure("slack", fields);
+  return {
+    config: {
+      ...config,
+      teamId: config.teamId || "__pending__",
+      botUserId: config.botUserId || "__pending__",
+    },
+    secrets,
+  };
 }
 
 export const definition: ChannelDefinition<SlackConnection> = {

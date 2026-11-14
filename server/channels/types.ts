@@ -24,6 +24,8 @@ export interface AdapterContext<C extends Connection = Connection> {
   onMessage: (message: NormalizedMessage) => void;
   onGroups: (events: GroupMembershipEvent[]) => void;
   onError: (error: Error) => void;
+  /** Report each successful transport handshake, including reconnects. */
+  onReady?: () => void;
   /** Persist server-derived identity fields (e.g. botUserId/username) back to
    * the connection config after a successful handshake. */
   updateConfig?: (fields: Partial<Connection>) => Promise<void>;

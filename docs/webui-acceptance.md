@@ -3,6 +3,13 @@
 前置：daemon 已重启并启用 WebUI（`features.webUi.enabled=true` 已写入 `~/.paseo/config.json`）。
 浏览器打开 `http://127.0.0.1:6767/`。
 
+## 2026-11-14 Slack 状态 / 当前关联修复验收
+
+- 自动回归：`node --test tests/manager.test.ts tests/channels/slack.test.ts`，44/44 通过；类型检查、全量测试 450/450、check:package、check:runtime 和文档链接检查通过。
+- 普通基线：438 pass / 5 cancelled，取消均为本机 Node 22 iMessage 定时器 unref 导致；仅对 imessage.test.ts 保持定时器引用的临时 preload 后，基线 443/443 通过，不修改生产计时器。修改后首次全量有既有 WhatsApp 配对时序抖动（scanned ≠ ok）；单文件及完整复跑均通过。
+- 本机执行 `paseo plugin reload paseo-im` 后为 running；只读 RPC 核验 Slack ready=true、running=true、lastError=null，im.test=true；已有聊天候选 5 个，与完整未归档目录逐项一致，Slack 当前关联显示 0 条，所有展示项均通过未归档目录校验。
+- 未重启 daemon、未删除历史 state、未改自动归档脚本。未做浏览器点击或新增真实消息收发测试，也未主动中断真实 Slack Socket；重复断线→hello 的状态迁移由 fake socket + Manager 回归验证。
+
 ## A. 插件加载与入口
 1. 侧栏出现 **IM** 条目（icon: MessagesSquare）。
 2. Settings → Plugins → paseo-im 状态 enabled、无 incompatible 提示（client bundle 编译成功才会如此）。
