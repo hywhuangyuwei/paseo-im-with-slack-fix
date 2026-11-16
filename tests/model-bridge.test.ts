@@ -124,7 +124,7 @@ test("command-only on first or later message switches without prompt or wait and
   assert.ok(h.events.includes("send:agent-1:cloud/sol-a:continue"));
 });
 
-test("ambiguous, absent, or empty query has readable error and never sends body/creates agent", async (t) => {
+test("ambiguous, absent, or query-with-body has readable error and never sends body/creates agent", async (t) => {
   const h = await fixture(t);
   for (const [id, text, error] of [["m1", "!m sol\nbody", /匹配到 2 个/], ["m2", "!m nope\nbody", /没有找到匹配/], ["m3", "!m\nbody", /用法/]] as const) {
     await h.send(id, text);
@@ -132,6 +132,37 @@ test("ambiguous, absent, or empty query has readable error and never sends body/
   }
   assert.equal(h.agents.size, 0);
   assert.equal(h.events.some((event) => event.startsWith("model:") || event.startsWith("send:")), false);
+});
+
+test("bare !m on a new thread reports defaults without creating an agent", async (t) => {
+  const h = await fixture(t);
+  await h.send("m1", "!m");
+  assert.equal(h.sent.at(-1)!.text, `当前模型（新会话默认）：pi/${DEFAULT_MODEL}`);
+  assert.equal(h.agents.size, 0);
+  assert.equal(h.state.job("m1")?.modelChange, undefined);
+  assert.equal(h.state.job("m1")?.dispatch, null);
+});
+
+test("bare !m reports the switched model without discovery, switch, or generation", async (t) => {
+  const h = await fixture(t);
+  await h.send("m1", "!m argon");
+  const api = await h.deps.daemon();
+  api.providers.snapshot = async () => { throw new Error("Query must not discover models"); };
+  const before = h.events.filter(event => event.startsWith("model:") || event.startsWith("send:"));
+  await h.send("m2", "!m");
+  assert.equal(h.sent.at(-1)!.text, `当前模型：pi/${NEW_MODEL}`);
+  assert.deepEqual(h.events.filter(event => event.startsWith("model:") || event.startsWith("send:")), before);
+  assert.equal(h.state.job("m2")?.delivery, "done");
+  assert.equal(h.state.job("m2")?.agentId, "agent-1");
+});
+
+test("bare !m can query a fixed/shared chat without changing it", async (t) => {
+  const h = await fixture(t);
+  await h.send("m1", "!m argon");
+  h.config.target = { kind: "agent", agentId: "agent-1", sharedHistory: true };
+  await h.send("m2", "!m", "thread-2");
+  assert.equal(h.sent.at(-1)!.text, `当前模型：pi/${NEW_MODEL}`);
+  assert.equal(h.events.filter(event => event.startsWith("model:")).length, 1);
 });
 
 test("non-Pi route or actual non-Pi agent refuses without switching/body", async (t) => {

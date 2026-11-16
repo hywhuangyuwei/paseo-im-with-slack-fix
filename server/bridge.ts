@@ -542,6 +542,23 @@ export class Bridge {
     const api = await this.deps.daemon();
     const command = parseModelCommand(job.text);
     if (command && job.answer) return job.answer;
+    if (command && !command.query) {
+      if (command.body) throw new UserFacingError("用法：!m 单独发送以查询当前模型；如需发送正文，请指定模型关键词或另发一条消息。");
+      const target = this.router.targetFor(this.deps.config(), job.conversationKey);
+      const known = this.deps.state.get().conversations[job.conversationKey]?.agentId ??
+        (target?.kind === "agent" ? target.agentId : null);
+      if (known) {
+        // Read only: no resume, model discovery, queueing on the agent, or switch.
+        const snapshot = await api.agents.ref(known).refresh();
+        if (snapshot && !snapshot.agent.archivedAt) {
+          this.deps.state.updateJob(job.messageId, { agentId: known, routeKey: job.conversationKey });
+          const model = snapshot.agent.runtimeInfo?.model;
+          return `当前模型：${snapshot.agent.provider}/${model || "默认（尚未解析）"}`;
+        }
+      }
+      if (target?.kind === "workspace") return `当前模型（新会话默认）：${target.profile.provider}`;
+      throw new UserFacingError("当前没有可查询的聊天模型，请先配置消息去向或创建会话。");
+    }
     if (command && job.dispatch !== "sent") {
       const target = this.router.targetFor(this.deps.config(), job.conversationKey);
       if (target?.kind !== "workspace") {

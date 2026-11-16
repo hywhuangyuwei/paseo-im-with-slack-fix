@@ -40,12 +40,13 @@
 
 | 能力 | 状态 | 范围 / 验证 |
 | --- | --- | --- |
-| `!m` 模糊选择 Pi 模型 | ✅ 回归通过，已部署 | 首行命令；ID/名称分词包含匹配，唯一命中才切换，歧义列候选 |
+| `!m` 模糊选择 Pi 模型 | ✅ 回归通过，已部署 | 首行命令；裸 `!m` 只读显示当前/新会话默认模型；带参数按ID/名称分词包含匹配，唯一命中才切换，歧义列候选 |
 | 当前 thread 后续沿用 / 新 thread 隔离 | ✅ 回归通过，已部署 | 只改工作区创建的独占 Pi agent，不改路由 profile；固定/共享 agent 拒绝 |
 | 无正文只切模型 / 切换回执 | ✅ 回归通过，已部署 | 无模型生成；有正文先回执再发送，失败不静默降级 |
 | 忙时队列 / 重载防重 / 超时补发 | ✅ 回归通过，已部署 | 等前轮结束；持久化解析结果与 applied/notified，派发 identity 回查；补发只读本命令结果 |
 
 - 使用说明与边界见 `README.md`「Thread 内切换 Pi 模型」。
+- 后续小功能：裸 `!m` 查询当前模型（尚无 agent 则显示新会话默认），不发现目录、不创建 agent、不切换或生成；已有/共享聊天也允许只读查询。仅类型检查及模型相关 23/23 定向测试，真实 Pi 裸查询和热重载后 Slack 健康检查通过，未运行大套件。
 - 拉取维护工具前验证通过：修改前 450 项、修改后 470 项测试全绿（新增 20 项）；双侧 typecheck、`check:package`、`check:runtime` 与 `git diff --check` 均通过。
 - 两组 `!m` 回归已加入默认 `npm test` 的 Slack 相关测试清单，也可单独运行 `node --test tests/model-command.test.ts tests/model-bridge.test.ts`；全部渠道入口为 `npm run test:all`。
 - 本机 Paseo 0.15.4 热重载成功，插件 enabled/running；重载后 im.list=12 渠道、Pi choices 可用，Slack running/ready=true、lastError=null、im.test=true。未重启 daemon，未修改归档定时任务。

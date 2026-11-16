@@ -64,6 +64,8 @@ Send `!m keywords` on the first line; an optional prompt starts on the next line
 Analyze this problem.
 ```
 
+Bare `!m` reports the current model without switching or generating a reply. Before an agent exists, it reports the thread's configured default without creating one. Fixed/shared chats can also be queried; do not append a prompt to a bare query.
+
 Keywords are case-insensitive substrings of the Pi model ID/name; every whitespace-separated term must match. Exact IDs take precedence. Only a unique match switches the model; ambiguous results list candidates and do not dispatch the prompt.
 
 A successful switch is acknowledged in the same thread before any prompt is sent. A command without a prompt does not start a generation. Later messages in this thread keep the selected model; new threads use the unchanged workspace defaults. Only workspace-created, thread-owned Pi agents are supported; fixed/shared chats are rejected to avoid affecting other threads. Requests queue behind current work, preserve the agent/history, and respect existing authorization/mention policies.

@@ -20,6 +20,11 @@
 - Slack 连接只读检查通过：running=true、ready=true、lastError=null、im.test=true。未发送真实 Slack 用户消息；Slack 入站规范化与正文派发由离线回归验证，不将该验收描述为真实 Slack 消息端到端测试。
 - 本机 Paseo 0.15.4 执行 `paseo plugin reload paseo-im --json` 成功，插件 enabled=true、status=running。重载后 im.list=12 渠道、Pi choices 可用，Slack running=true、ready=true、lastError=null、im.test=true。未重启 daemon，未改变归档定时任务。
 
+### 裸 `!m` 查询小功能
+
+- 类型检查及模型相关定向回归 23/23 通过，未跑全量/大套件。新增测试覆盖新 thread 只读默认、切换后实际模型、已有/共享聊天只读查询。
+- 热重载后 running/ready 和 im.test 正常；独立真实 Pi agent 的裸 `!m` 返回已切换的实际模型，modelChange 未设置、dispatch=null，无模型切换或正文生成；自建验收 agent 已归档。真实 Slack 用户消息端到端仍未测试。
+
 ## A. 插件加载与入口
 1. 侧栏出现 **IM** 条目（icon: MessagesSquare）。
 2. Settings → Plugins → paseo-im 状态 enabled、无 incompatible 提示（client bundle 编译成功才会如此）。
