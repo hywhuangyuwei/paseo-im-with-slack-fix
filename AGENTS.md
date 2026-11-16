@@ -5,7 +5,7 @@
 
 ## 1. 门禁铁律
 
-- 任何代码变更前后各跑一次：`npm run typecheck && npm test`（全绿才算完成）。
+- 任何代码变更前后各跑一次：`npm run typecheck && npm test`（全绿才算完成）。本分支默认只跑 Slack 适配器、其共享桥接/后台回发/连接管理/权限/队列/路由/状态/分段逻辑和 Slack dm 归档维护测试；全渠道测试保留为 `npm run test:all`，仅按需显式运行。
 - 新增/修改渠道适配器：必须对照 `docs/channel-test-matrix.md` 该渠道清单补充/更新测试；实机联调项按 K 清单验收并记录到 `docs/webui-acceptance.md`。
 - 触碰文档：状态变化同步 `docs/status.md`（状态表/修复索引），踩坑同步 `docs/gotchas.md` 对应节——知识回路是既定工作法，不是可选动作。
 

@@ -94,7 +94,8 @@ Human and agent contributors are equally welcome:
 ```sh
 npm install
 npm run typecheck   # dual tsconfig (server + client)
-npm test            # node --test (runs TS natively, Node 22.18+)
+npm test            # Slack adapter, shared bridge logic, and Slack dm archival
+npm run test:all    # Optional: all channels and maintenance tests (Node 22.18+)
 npm run check:package
 npm run check:runtime
 paseo plugin install /absolute/path/to/paseo-im   # or reload during local development

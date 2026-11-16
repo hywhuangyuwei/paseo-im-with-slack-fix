@@ -22,10 +22,25 @@
 - IM「已关联会话」及已有聊天候选只展示当前未归档 agent；closed 但未归档的仍保留。目录完整分页，先过滤再截取最近 50 条；仅过滤展示，不删除历史路由状态。
 - 验证：`tests/manager.test.ts` 与 Slack 重连回归；线上重载/RPC 结果见 `docs/webui-acceptance.md`。
 
+### 运维维护分类：Slack dm 闲置 agent 归档
+
+- 新增 `maintenance/agent-archive/`，接管原仓库外的归档脚本、cron 入口和独立测试；说明见 [maintenance/README.md](../maintenance/README.md)。
+- 筛选修正为 **agent 标题**（`paseo ls` 的名称）不区分大小写同时包含 `Slack` 与 `dm`；连接仅要求 `channel=slack`，支持多个连接分别检查，并保留 `im/connection`、`im/conversation` 标签校验。中途改名会在归档前重新检查。
+- 保留 24 小时闲置阈值、运行/关注/未完成投递/后台续跑/澄清问题/显式绑定保护、操作前复查和无 `--force`。归档后旧工作区线程会新建 agent，历史文件保留。
+- cron 每天 20:10 UTC（北京时间次日 04:10），运行路径迁到本仓库；锁与日志仍留仓库外。安装插件不自动注册定时任务。
+- 归档 fixture 纳入默认 Slack 相关 `npm test`，含不带 dm 的连接名、标题匹配/排除、标签隔离、24 小时阈值与归档前改名回归；子进程测试使用合成配置和 fake CLI，不接触生产归档。修复后默认 98/98 通过，typecheck、check:package、check:runtime 通过；生产 dry-run 为 `connections=1 agents=4 matched=2 eligible=0`，标题已命中但尚未全部通过闲置及保护条件。不重命名连接、不真实归档。修复根因见 gotchas §11。
+
+### 默认测试范围：仅 Slack 相关
+
+- `npm test` 只运行 Slack 适配器、共享桥接/后台续跑/连接管理/权限/队列/路由迁移/状态持久化/文本分段和 Slack dm 归档维护测试，不执行其他渠道适配器测试。
+- 原全渠道及维护测试保留为 `npm run test:all`，仅按需显式执行；默认不需要 iMessage 的 Node 22 定时器兼容 preload。类型检查仍覆盖 server/client。
+- 验证：无兼容 preload 的默认 `npm test` 98/98 通过（0 失败、0 取消）；typecheck、check:package、check:runtime 及 diff 空白检查通过。本轮未运行全渠道测试。
+
 ## 2. 缺陷修复索引（实机调试全记录，按主题）
 
 | 主题 | 现象 | 根因 | 细节 |
 | --- | --- | --- | --- |
+| Slack dm 归档未匹配 | ls 明明有 Slack dm agent，但脚本 connections=0 | 将 agent 名称条件误放在连接名称上，CLI name 实际对应 agent.title | gotchas §11 |
 | Slack 重连状态卡住 | 已恢复收发仍显示断开/退避 | Manager 只在首次 start 完成后清错，后续 hello 没有状态通知 | gotchas §9 |
 | IM 历史关联过多 | 已归档或无绑定会话继续展示 | 直接列举历史 conversations，未与实时未归档目录求交 | gotchas §10 |
 | Telegram 出站全网失败 | 连接报「网络错误」自动重试，同机 curl 正常 | WSL2 双栈域名 IPv6 路由黑洞，node 拨号卡 v6 不回退 v4 | gotchas §5.5 |
@@ -40,7 +55,7 @@
 ## 3. 自测 / 验收命令集（全部无人工可跑）
 
 ```sh run
-# 全量门禁：双侧 tsc + 全量测试（提交前必跑）
+# 默认门禁：双侧 tsc + Slack 相关回归（提交前必跑）
 cd "$(git rev-parse --show-toplevel)" && npm run typecheck && npm test
 ```
 

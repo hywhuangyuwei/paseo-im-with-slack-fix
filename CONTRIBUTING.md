@@ -12,7 +12,8 @@
 
 ```sh
 npm run typecheck   # 双侧 tsc（server + client）
-npm test            # 全量测试（node --test）
+npm test            # 默认 Slack 适配器、相关共享逻辑及 Slack dm 归档测试
+npm run test:all    # 可选：全渠道及维护测试（node --test）
 node scripts/check-redaction.mjs   # 脱敏守卫（不得含真实 ID/本机路径）
 ```
 

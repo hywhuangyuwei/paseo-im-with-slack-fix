@@ -77,6 +77,10 @@ paseo plugin add /absolute/path/to/paseo-im
 | [docs/design.md](./docs/design.md) | 架构设计 |
 | [docs/webui-acceptance.md](./docs/webui-acceptance.md) | WebUI 与实机验收记录 |
 
+## 运维维护
+
+[`maintenance/`](./maintenance/README.md) 是独立于插件运行时的维护工具分类，目前包含 Slack dm 闲置 agent 定时归档。安装插件不会自动启用 cron；部署与安全边界见目录说明。
+
 ## 参与共建
 
 人类与 agent 贡献者同样欢迎：
@@ -92,7 +96,8 @@ paseo plugin add /absolute/path/to/paseo-im
 ```sh
 npm install
 npm run typecheck   # server + client 两套 tsconfig
-npm test            # node --test（Node 22.18+ 原生跑 TS）
+npm test            # Slack 适配器 + 相关共享逻辑 + Slack dm 归档测试
+npm run test:all    # 可选：全部渠道及维护测试（Node 22.18+）
 npm run check:package
 npm run check:runtime
 paseo plugin install /absolute/path/to/paseo-im   # 或本地开发 reload

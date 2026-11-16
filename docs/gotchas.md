@@ -180,3 +180,13 @@ net.setDefaultAutoSelectFamily(false);
 **修复**：实时查询未归档 agent 目录（含 background，固定 created_at 排序完整分页），与关联 agentId 求交，之后才排序及截取 50 条；聊天候选复用同一目录查询。保留 closed 未归档项，不改写/删除历史 state，不改变路由和归档脚本。目录错误应失败，不可回退展示全部历史。
 
 **验证**：manager/目录测试覆盖已归档、已删除、null 绑定、closed 未归档、分页、重复 cursor、过滤前历史超过 50 条、外部归档后下次查询生效和失败边界。
+
+## 11. Slack dm 归档条件应匹配 agent 标题，而非连接名称
+
+**现象**：`paseo ls` 中有名称形如 `Slack GCP · dm:chat-1:thread-1` 的 agent，但归档 dry-run 输出 `connections=0`。
+
+**根因**：将同时包含 Slack 和 dm 的条件放在连接名上；实际连接叫 `Slack GCP`，只有 agent 标题带有 dm。安装版 CLI 将目录 API 的 `agent.title` 映射为 ls 的 `name`，不能直接在目录结果里读取 `agent.name`。
+
+**修复**：从 `channel=slack` 的连接获取 state，以 `agent.title` 不区分大小写同时命中 Slack/dm，并保留连接/会话标签及全部闲置/在途保护。归档前重新检查标题，避免改名后继续归档；日志区分 `matched` 和 `eligible`。
+
+**验证**：fixture 覆盖连接名不带 dm 仍发现 agent、大小写/顺序/缺失标题、非关联标签、闲置保护；隔离 fake CLI 子进程回归覆盖 dry-run、无 --force 的假归档和中途改名跳过。生产仅运行 dry-run，不记录真实聊天标识、不真实归档。
