@@ -17,7 +17,9 @@ import { AgentQueue } from "./queue.ts";
 import { splitChunks } from "./format/chunks.ts";
 import { isAuthorized, deniedHint } from "./policy.ts";
 import { createProgressSink, type ProgressSink } from "./progress.ts";
-import { Router } from "./routing.ts";
+import { CONNECTION_LABEL, CONVERSATION_LABEL, Router } from "./routing.ts";
+import { mapProviderChoices } from "./choices.ts";
+import { parseModelCommand, resolvePiModel } from "./model-command.ts";
 import type { Job, StateStore } from "./state-store.ts";
 import { advanceFollowup } from "./followup.ts";
 
@@ -32,6 +34,7 @@ export interface BridgeDeps {
   state: StateStore;
   queue: AgentQueue;
   daemon: () => Promise<PaseoApi>;
+  setAgentModel?: (agentId: string, modelId: string) => Promise<void>;
   settings: () => Promise<ImSettings>;
   deferred: { track(jobId: string): void; resolve(jobId: string): void };
   followups?: { track(jobId: string): void };
@@ -73,7 +76,7 @@ export class Bridge {
     }
 
     // A reply to a pending question form is control input, never a new task.
-    if (message.replyTo?.id) {
+    if (message.replyTo?.id && !parseModelCommand(message.text)) {
       let matched = Object.values(state.get().jobs).find(
         (job) =>
           job.question !== null &&
@@ -229,6 +232,17 @@ export class Bridge {
     const timeout = Promise.withResolvers<never>();
     const timer = setTimeout(() => timeout.reject(new DeferredTimeoutError()), budgetMs);
     const wait = this.answer(job, sink);
+    if (parseModelCommand(job.text)) {
+      // A command can time out while queued behind an external turn. Its own
+      // result (including command-only receipts/errors) must survive for the
+      // deferred sweep; never mistake the preceding turn's answer for it.
+      void wait.then(
+        (answer) => this.deps.state.updateJob(job.messageId, { answer }),
+        (error) => {
+          if (!this.deps.signal.aborted) this.deps.state.updateJob(job.messageId, { answer: userMessage(error) });
+        },
+      );
+    }
     try {
       return await Promise.race([wait, timeout.promise]);
     } catch (error) {
@@ -314,7 +328,16 @@ export class Bridge {
   async resumeDeferred(jobId: string): Promise<boolean> {
     const { state, adapter: readAdapter } = this.deps;
     const job = state.job(jobId);
-    if (!job || !job.agentId || job.delivery === "done") return true;
+    if (!job || job.delivery === "done") return true;
+    if (parseModelCommand(job.text)) {
+      if (job.failure || job.answer) {
+        await this.deliverAnswer(job, job.failure || job.answer!);
+        return true;
+      }
+      // answer() still owns this command's agent queue and tracks its result.
+      return false;
+    }
+    if (!job.agentId) return true;
     const api = await this.deps.daemon();
     const agent = api.agents.ref(job.agentId);
     const result = await waitForTask(agent, this.deps.signal);
@@ -332,7 +355,7 @@ export class Bridge {
   async rerunQueued(jobId: string): Promise<void> {
     const job = this.deps.state.job(jobId);
     if (!job || job.delivery === "done") return;
-    if (job.dispatch === null && !job.questionReply && job.agentId !== null) {
+    if (job.dispatch === null && !job.questionReply && !job.modelChange?.applied && job.agentId !== null) {
       this.deps.state.updateJob(jobId, { agentId: null, routeKey: null });
     }
     await this.deps.queue.run(
@@ -517,6 +540,25 @@ export class Bridge {
 
   private async answer(job: Job, sink: ProgressSink): Promise<string> {
     const api = await this.deps.daemon();
+    const command = parseModelCommand(job.text);
+    if (command && job.answer) return job.answer;
+    if (command && job.dispatch !== "sent") {
+      const target = this.router.targetFor(this.deps.config(), job.conversationKey);
+      if (target?.kind !== "workspace") {
+        throw new UserFacingError("!m 仅支持工作区创建的独立 Pi 会话；已有/共享聊天可能影响其他 thread，因此未切换，正文未发送。请使用工作区消息去向。");
+      }
+      if (!job.agentId && !this.deps.state.get().conversations[job.conversationKey]?.agentId && !target.profile.provider.startsWith("pi/")) {
+        throw new UserFacingError("!m 暂时只支持 Pi provider。模型未修改，正文未发送。");
+      }
+      if (!job.modelChange) {
+        const snapshot = await api.providers.snapshot();
+        const model = resolvePiModel(command.query, mapProviderChoices(snapshot.entries));
+        await this.deps.state.mutate((draft) => {
+          draft.jobs[job.messageId]!.modelChange = { modelId: model.id, applied: false, notified: false };
+        });
+        job = this.deps.state.job(job.messageId)!;
+      }
+    }
     if (!job.agentId) {
       const prepared = await this.router.prepare(
         this.deps.config(),
@@ -547,15 +589,64 @@ export class Bridge {
         if (!snapshot || snapshot.agent.archivedAt || snapshot.agent.status === "closed") {
           throw new UserFacingError("关联的 Paseo 聊天当前不可用。");
         }
-        if (snapshot.agent.activeTurn) {
-          await waitForTask(agent, this.deps.signal);
+        if (command) {
+          if (snapshot.agent.provider !== "pi") {
+            throw new UserFacingError("!m 暂时只支持 Pi provider。模型未修改，正文未发送。");
+          }
+          if (snapshot.agent.pendingPermissions?.length) {
+            throw new UserFacingError("当前 Pi 任务等待权限/回答，请先在 Paseo 中处理，再重新发送 !m。模型未修改，正文未发送。");
+          }
+          const labels = snapshot.agent.labels;
+          const shared = Object.entries(this.deps.state.get().conversations).some(
+            ([key, entry]) => key !== job.conversationKey && entry.agentId === job.agentId,
+          );
+          if (labels?.[CONNECTION_LABEL] !== this.deps.connectionId || labels?.[CONVERSATION_LABEL] !== job.conversationKey || shared) {
+            throw new UserFacingError("该聊天不是本 thread 独占的 IM agent，为避免影响其他 thread，模型未修改，正文未发送。");
+          }
         }
-        const after = await this.timelineAfter(agent);
-        this.deps.state.updateJob(job.messageId, { dispatch: "sending", after });
+        if (snapshot.agent.activeTurn) {
+          const priorTurn = await waitForTask(agent, this.deps.signal);
+          if (command && priorTurn.status !== "idle") {
+            throw new UserFacingError("当前 Pi 任务尚未正常结束（可能等待权限/回答），请先在 Paseo 中处理，再重新发送 !m。模型未修改，正文未发送。");
+          }
+        }
         const identity = messageIdentity(this.deps.connectionId, job.messageId);
         const alreadySent = await this.findDispatch(agent, identity);
+        // Crash recovery: a found dispatch must not reapply an old model change.
+        if (!alreadySent && command) {
+          job = this.deps.state.job(job.messageId)!;
+          const change = job.modelChange!;
+          if (!change.applied) {
+            if (!this.deps.setAgentModel) throw new UserFacingError("当前桥接不支持模型切换，正文未发送。");
+            try {
+              await this.deps.setAgentModel(job.agentId!, change.modelId);
+            } catch {
+              throw new UserFacingError("Pi 模型切换失败，正文未发送；请在 Paseo 查看详情或换模型重试。");
+            }
+            const confirmed = await agent.refresh();
+            if (confirmed?.agent.runtimeInfo?.model !== change.modelId) {
+              throw new UserFacingError("Pi 模型切换未能确认，正文未发送；请在 Paseo 中核对当前模型。");
+            }
+            await this.deps.state.mutate((draft) => { draft.jobs[job.messageId]!.modelChange!.applied = true; });
+          }
+          const notice = `✅ 本 thread 后续使用 Pi 模型：${change.modelId}。新 thread 不受影响。`;
+          if (!command.body) return notice;
+          if (!change.notified) {
+            // Do not execute the body silently if the receipt cannot be delivered.
+            let sent;
+            try {
+              sent = await this.deps.adapter().sendText({ chatId: job.chatId, threadId: job.threadId ?? undefined, text: notice });
+            } catch {
+              throw new UserFacingError(`模型已切换为 ${change.modelId}，但切换回执发送失败，正文未发送。请核对后重试。`);
+            }
+            if (sent.messageId) this.deps.adapter().rememberOwnMessage?.(sent.messageId);
+            await this.deps.state.mutate((draft) => { draft.jobs[job.messageId]!.modelChange!.notified = true; });
+          }
+        }
         if (!alreadySent) {
-          const text = job.text ?? "";
+          const after = await this.timelineAfter(agent);
+          this.deps.state.updateJob(job.messageId, { dispatch: "sending", after });
+          const text = command ? command.body : job.text ?? "";
           const prompt = text || "（此消息只包含附件）";
           await agent.send(prompt, { messageId: identity, activeTurnBehavior: "steer" });
         }

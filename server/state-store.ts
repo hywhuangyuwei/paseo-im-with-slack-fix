@@ -34,6 +34,12 @@ export const jobSchema = z
     text: z.string().max(20_000).nullable().default(null),
     routeKey: z.string().max(400).nullable().default(null),
     agentId: z.string().max(256).nullable().default(null),
+    // Optional for old job literals/state files; resolved ID is durable across reloads.
+    modelChange: z.object({
+      modelId: z.string().min(1).max(512),
+      applied: z.boolean(),
+      notified: z.boolean(),
+    }).strict().optional(),
     dispatch: z.enum(["sending", "sent"]).nullable().default(null),
     after: z
       .object({ epoch: z.string().max(128), seq: z.number().int() })

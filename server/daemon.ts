@@ -28,6 +28,7 @@ export function localTarget(listen: string): { url: string; socketPath?: string 
 export interface DaemonConnection {
   api: PaseoApi;
   serverId: string | null;
+  setAgentModel(agentId: string, modelId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -86,6 +87,7 @@ export async function connectLocalDaemon(home: string): Promise<DaemonConnection
   return {
     api: createPaseoApi(client),
     serverId: lock.serverId ?? null,
+    setAgentModel: (agentId, modelId) => client.setAgentModel(agentId, modelId),
     close: async () => {
       await client.close();
     },

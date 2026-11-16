@@ -412,6 +412,11 @@ export class Manager {
         state,
         queue: this.queue,
         daemon: () => this.daemon(),
+        setAgentModel: async (agentId, modelId) => {
+          await this.daemon();
+          if (!this.daemonConnection) throw new UserFacingError("本地 Paseo daemon 尚未就绪。");
+          await this.daemonConnection.setAgentModel(agentId, modelId);
+        },
         settings: () => this.settings(),
         deferred: { track: (id) => this.deferred.track(id), resolve: (id) => this.deferred.resolve(id) },
         followups: { track: (id) => followups.track(id) },

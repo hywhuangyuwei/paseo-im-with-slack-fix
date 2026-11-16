@@ -10,6 +10,16 @@
 - 本机执行 `paseo plugin reload paseo-im` 后为 running；只读 RPC 核验 Slack ready=true、running=true、lastError=null，im.test=true；已有聊天候选 5 个，与完整未归档目录逐项一致，Slack 当前关联显示 0 条，所有展示项均通过未归档目录校验。
 - 未重启 daemon、未删除历史 state、未改自动归档脚本。未做浏览器点击或新增真实消息收发测试，也未主动中断真实 Slack Socket；重复断线→hello 的状态迁移由 fake socket + Manager 回归验证。
 
+## 2026-11-16 `!m` 模型切换验收
+
+- 默认 `npm test` 已包含两组模型命令回归，共 118/118 通过（无失败、取消或跳过）；双侧 typecheck、check:package、check:runtime、diff 空白检查通过。
+- 真实 daemon + Pi provider 验证：使用独立验收工作区、合成 IM 消息及记录回执的适配器，不读取 Slack 凭据文件，不修改现有 IM 聊天。
+- 默认模型 `nv-infer/azure/openai/gpt-6.1-sol` 与目标 `nv-infer/gcp/google/gemini-4-argon` 间多次真实切换，逐次读回 `runtimeInfo.model` 一致；同 thread 复用同一 agent，新 thread 创建不同 agent 并保持默认模型，路由 profile 未改变。
+- 纯 `!m` 收到成功回执，时间线无 user_message，未触发模型生成。验收产生的三个 agent 均已归档清理。
+- 当前目录中 `argon` 与 `4.1 local` 唯一命中；`sol a` 未唯一确定时拒绝猜测，提示细化关键词。
+- Slack 连接只读检查通过：running=true、ready=true、lastError=null、im.test=true。未发送真实 Slack 用户消息；Slack 入站规范化与正文派发由离线回归验证，不将该验收描述为真实 Slack 消息端到端测试。
+- 本机 Paseo 0.15.4 执行 `paseo plugin reload paseo-im --json` 成功，插件 enabled=true、status=running。重载后 im.list=12 渠道、Pi choices 可用，Slack running=true、ready=true、lastError=null、im.test=true。未重启 daemon，未改变归档定时任务。
+
 ## A. 插件加载与入口
 1. 侧栏出现 **IM** 条目（icon: MessagesSquare）。
 2. Settings → Plugins → paseo-im 状态 enabled、无 incompatible 提示（client bundle 编译成功才会如此）。

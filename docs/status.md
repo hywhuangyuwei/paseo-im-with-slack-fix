@@ -36,6 +36,21 @@
 - 原全渠道及维护测试保留为 `npm run test:all`，仅按需显式执行；默认不需要 iMessage 的 Node 22 定时器兼容 preload。类型检查仍覆盖 server/client。
 - 验证：无兼容 preload 的默认 `npm test` 98/98 通过（0 失败、0 取消）；typecheck、check:package、check:runtime 及 diff 空白检查通过。本轮未运行全渠道测试。
 
+### Thread 模型命令 `!m`（2026-11-16 已部署，真实 Slack 消息端到端未测）
+
+| 能力 | 状态 | 范围 / 验证 |
+| --- | --- | --- |
+| `!m` 模糊选择 Pi 模型 | ✅ 回归通过，已部署 | 首行命令；ID/名称分词包含匹配，唯一命中才切换，歧义列候选 |
+| 当前 thread 后续沿用 / 新 thread 隔离 | ✅ 回归通过，已部署 | 只改工作区创建的独占 Pi agent，不改路由 profile；固定/共享 agent 拒绝 |
+| 无正文只切模型 / 切换回执 | ✅ 回归通过，已部署 | 无模型生成；有正文先回执再发送，失败不静默降级 |
+| 忙时队列 / 重载防重 / 超时补发 | ✅ 回归通过，已部署 | 等前轮结束；持久化解析结果与 applied/notified，派发 identity 回查；补发只读本命令结果 |
+
+- 使用说明与边界见 `README.md`「Thread 内切换 Pi 模型」。
+- 拉取维护工具前验证通过：修改前 450 项、修改后 470 项测试全绿（新增 20 项）；双侧 typecheck、`check:package`、`check:runtime` 与 `git diff --check` 均通过。
+- 两组 `!m` 回归已加入默认 `npm test` 的 Slack 相关测试清单，也可单独运行 `node --test tests/model-command.test.ts tests/model-bridge.test.ts`；全部渠道入口为 `npm run test:all`。
+- 本机 Paseo 0.15.4 热重载成功，插件 enabled/running；重载后 im.list=12 渠道、Pi choices 可用，Slack running/ready=true、lastError=null、im.test=true。未重启 daemon，未修改归档定时任务。
+- 默认门禁 118/118 通过；真实 Pi 使用独立测试 agent 验证模型切换读回、同 thread 复用、新 thread 默认隔离及纯命令无生成，验收 agent 已归档。未修改现有 IM 聊天模型，未发送真实 Slack 用户消息；详情见 `docs/webui-acceptance.md` 的本轮记录。
+
 ## 2. 缺陷修复索引（实机调试全记录，按主题）
 
 | 主题 | 现象 | 根因 | 细节 |
