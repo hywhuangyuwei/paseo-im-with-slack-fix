@@ -47,6 +47,18 @@ export function messageIdentity(connectionId: string, messageId: string): string
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
+function isCommandOnlyJob(job: Job): boolean {
+  const command = parseModelCommand(job.text);
+  return command !== null && !command.body;
+}
+
+function supersedesFollowup(entry: Job, conversationKey: string): boolean {
+  if (entry.conversationKey !== conversationKey) return false;
+  if (isCommandOnlyJob(entry)) return false;
+  if (entry.failure !== null && entry.dispatch === null) return false;
+  return true;
+}
+
 export class Bridge {
   private readonly deps: BridgeDeps;
   private readonly router: Router;
@@ -315,7 +327,24 @@ export class Bridge {
         return;
       }
       const text = userMessage(error);
-      state.updateJob(jobId, { failure: text });
+      const current = state.updateJob(jobId, { failure: text });
+      if (current?.dispatch !== null) {
+        await state.mutate((draft) => {
+          for (const other of Object.values(draft.jobs)) {
+            if (other.messageId === jobId) break;
+            if (other.conversationKey === current?.conversationKey && other.followup) {
+              other.followup = null;
+            }
+          }
+        });
+      } else if (current) {
+        for (const other of Object.values(state.get().jobs)) {
+          if (other.messageId === jobId) break;
+          if (other.conversationKey === current.conversationKey && other.delivery === "done" && other.followup && !other.followup.uncertain) {
+            this.deps.followups?.track(other.messageId);
+          }
+        }
+      }
       await readAdapter()
         .sendText({ chatId: job.chatId, threadId: job.threadId ?? undefined, text })
         .catch(() => {});
@@ -382,17 +411,28 @@ export class Bridge {
   }
 
   /** Persist the first delivery and its timeline cursor together. The watcher
-   * starts only for newly delivered IM jobs, never retroactively for old jobs. */
+   * starts only for newly delivered IM jobs, never retroactively for old jobs.
+   * Unconsumed pendingTasks from the same conversation and agent are caught up
+   * to this job's pre-dispatch cursor and handed off to the new watcher. */
   private async completeDelivery(jobId: string, answer: string): Promise<void> {
     const { state, followups } = this.deps;
+    const current = state.job(jobId);
+    const tracksFollowup = Boolean(followups && current && current.after && current.dispatch === "sent" && !current.questionReply);
+    const pendingTasks = tracksFollowup && current ? await this.collectInheritedTasks(current) : [];
     await state.mutate((draft) => {
       const entry = draft.jobs[jobId];
       if (!entry) return;
       entry.answer = answer;
       entry.delivery = "done";
-      if (followups && entry.after && entry.dispatch === "sent" && !entry.questionReply) {
+      if (tracksFollowup && entry.after) {
+        for (const other of Object.values(draft.jobs)) {
+          if (other.messageId === jobId) break;
+          if (other.conversationKey === entry.conversationKey && other.followup) {
+            other.followup = null;
+          }
+        }
         entry.followup = {
-          cursor: { ...entry.after }, originSeen: false, pendingTasks: [],
+          cursor: { ...entry.after }, originSeen: false, pendingTasks,
           waitingForReply: false, candidate: null, lastAnswer: answer,
           sending: null, uncertain: false, expiresAt: Date.now() + 7 * 24 * 60 * 60_000,
         };
@@ -400,6 +440,45 @@ export class Bridge {
       entry.updatedAt = Date.now();
     });
     if (state.job(jobId)?.followup) followups?.track(jobId);
+  }
+
+  private async collectInheritedTasks(job: Job): Promise<string[]> {
+    if (!job.agentId || !job.after) return [];
+    const jobs = Object.values(this.deps.state.get().jobs);
+    const index = jobs.findIndex((entry) => entry.messageId === job.messageId);
+    if (index <= 0) return [];
+    const prior = [...jobs.slice(0, index)]
+      .reverse()
+      .find((entry) => entry.conversationKey === job.conversationKey && entry.followup !== null);
+    if (!prior?.followup || prior.agentId !== job.agentId) return [];
+    const watch = structuredClone(prior.followup);
+    if (watch.uncertain || watch.sending || Date.now() > watch.expiresAt || watch.cursor.epoch !== job.after.epoch) {
+      return [];
+    }
+    try {
+      const agent = (await this.deps.daemon()).agents.ref(job.agentId);
+      let pages = 0;
+      while (watch.cursor.seq < job.after.seq) {
+        this.deps.signal.throwIfAborted();
+        const previous = watch.cursor.seq;
+        const page = await agent.timeline.refetch({ direction: "after", cursor: watch.cursor, limit: 200 });
+        if (page.error || page.epoch !== watch.cursor.epoch || page.reset || page.staleCursor || page.gap) {
+          return [];
+        }
+        const entries = page.entries.filter((entry) => entry.seqStart > previous && entry.seqStart <= job.after!.seq);
+        if (advanceFollowup(watch, entries, messageIdentity(this.deps.connectionId, prior.messageId)) === "superseded") {
+          return [];
+        }
+        if (page.endCursor && page.endCursor.seq > previous) {
+          watch.cursor = { epoch: page.epoch, seq: Math.min(page.endCursor.seq, job.after.seq) };
+        }
+        if (!page.hasNewer || page.entries.some((entry) => entry.seqStart > job.after!.seq)) break;
+        if (watch.cursor.seq <= previous || ++pages >= 100) return [];
+      }
+      return watch.pendingTasks.slice(0, 100);
+    } catch {
+      return [];
+    }
   }
 
   /** Poll only an IM dispatch's own timeline. A matched Pi background-task
@@ -413,8 +492,11 @@ export class Bridge {
     const jobs = Object.values(this.deps.state.get().jobs);
     const index = jobs.findIndex((entry) => entry.messageId === jobId);
     if (index < 0) return true;
-    if (jobs.slice(index + 1).some((entry) => entry.conversationKey === job.conversationKey)) {
-      await this.deps.state.mutate((draft) => { if (draft.jobs[jobId]) draft.jobs[jobId]!.followup = null; });
+    const later = jobs.slice(index + 1).filter((entry) => supersedesFollowup(entry, job.conversationKey));
+    if (later.length > 0) {
+      if (later.some((entry) => entry.delivery === "done" || entry.failure !== null)) {
+        await this.deps.state.mutate((draft) => { if (draft.jobs[jobId]) draft.jobs[jobId]!.followup = null; });
+      }
       return true;
     }
     return this.deps.queue.run(`conversation:${job.conversationKey}`, () => this.scanFollowup(jobId), this.deps.signal);
@@ -444,8 +526,12 @@ export class Bridge {
     if (Date.now() > watch.expiresAt) return close("跟踪期限已到");
     const jobs = Object.values(state.get().jobs);
     const ownIndex = jobs.findIndex((entry) => entry.messageId === jobId);
-    if (jobs.slice(ownIndex + 1).some((entry) => entry.conversationKey === job.conversationKey)) {
-      return close("同一会话已有新消息");
+    const later = jobs.slice(ownIndex + 1).filter((entry) => supersedesFollowup(entry, job.conversationKey));
+    if (later.length > 0) {
+      if (later.some((entry) => entry.delivery === "done" || entry.failure !== null)) {
+        return close("同一会话已有新消息");
+      }
+      return true;
     }
     const bound = state.get().conversations[job.conversationKey];
     if (!bound || bound.agentId !== job.agentId) return close("会话绑定已变化");
@@ -487,8 +573,12 @@ export class Bridge {
     const currentJobs = Object.values(state.get().jobs);
     const currentIndex = currentJobs.findIndex((entry) => entry.messageId === jobId);
     if (currentIndex < 0) return true;
-    if (currentJobs.slice(currentIndex + 1).some((entry) => entry.conversationKey === job.conversationKey)) {
-      return close("同一会话已有新消息");
+    const currentLater = currentJobs.slice(currentIndex + 1).filter((entry) => supersedesFollowup(entry, job.conversationKey));
+    if (currentLater.length > 0) {
+      if (currentLater.some((entry) => entry.delivery === "done" || entry.failure !== null)) {
+        return close("同一会话已有新消息");
+      }
+      return true;
     }
     if (watch.candidate?.text === watch.lastAnswer) {
       watch.candidate = null;

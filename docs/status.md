@@ -52,6 +52,12 @@
 - 本机 Paseo 0.15.4 热重载成功，插件 enabled/running；重载后 im.list=12 渠道、Pi choices 可用，Slack running/ready=true、lastError=null、im.test=true。未重启 daemon，未修改归档定时任务。
 - 默认门禁 118/118 通过；真实 Pi 使用独立测试 agent 验证模型切换读回、同 thread 复用、新 thread 默认隔离及纯命令无生成，验收 agent 已归档。未修改现有 IM 聊天模型，未发送真实 Slack 用户消息；详情见 `docs/webui-acceptance.md` 的本轮记录。
 
+### 2026-11-17 同 Thread 跨轮后台续跑 `pendingTasks` 交接修复
+
+- 保持每会话最多单个活跃 `followup` watcher 的不变量；同会话同 `agentId` 的新消息完成首轮投递时，先将前序 `followup` 追平至新消息 `after` 游标，再将未消费的 `pendingTasks` 交接给新 Job 并清空旧 `followup`。
+- 不向 Agent 发送 prompt 的纯 `!m` 命令及派发前校验失败的请求不打断现有 `followup`。
+- 验证：默认门禁 `npm run typecheck && npm test` 125/125 通过（新增 4 项跨轮交接/游标追平/裸 `!m` 不打断用例），`check:package`、`check:runtime`、脱敏/链接守卫与 `git diff --check` 通过；本机 `paseo plugin reload paseo-im` 热重载后 `im.list=12`、Slack `running/ready=true`、`lastError=null`、`im.test=true`。详情见 gotchas §8。
+
 ## 2. 缺陷修复索引（实机调试全记录，按主题）
 
 | 主题 | 现象 | 根因 | 细节 |
@@ -61,7 +67,7 @@
 | IM 历史关联过多 | 已归档或无绑定会话继续展示 | 直接列举历史 conversations，未与实时未归档目录求交 | gotchas §10 |
 | Telegram 出站全网失败 | 连接报「网络错误」自动重试，同机 curl 正常 | WSL2 双栈域名 IPv6 路由黑洞，node 拨号卡 v6 不回退 v4 | gotchas §5.5 |
 | 插件重载丢在途回复 | 重载窗口内的 agent 回复静默丢失 | 内存队列蒸发，job 冻结 dispatch null/sent | gotchas §7 |
-| Pi 后台续跑答复未回发 IM | 首次 idle 已回复，后台完成后的最终答复丢失 | 旧桥接只追踪首轮，无后台续跑关联 | gotchas §8 |
+| Pi 后台续跑答复未回发 IM | 首次 idle 已回复，后台完成后的最终答复丢失；或同 thread 中途插话后前序未到期 `bg_run` 唤醒答复丢失 | 旧桥接只追踪首轮；后继消息直接清空旧 `followup` 未交接 `pendingTasks` | gotchas §8 |
 | 微信配对无二维码 | 点击扫码配对无响应/白卡 | qrUrl 是 text/html 落地页 + pollLogin 30s 阻塞 + configure 鸡生蛋死锁 | gotchas §5.7 |
 | 凭证输入无显示/切换 | 手机端无眼睛按钮 | labelAccessory 仅 web host 渲染 | gotchas §5.6 |
 | 改去向不生效 | 换新 agent 后消息仍进旧会话 | 会话绑定压过 target + save 双实例竞态回滚 | gotchas §5.8 |

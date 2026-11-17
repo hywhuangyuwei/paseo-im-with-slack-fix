@@ -159,7 +159,12 @@ net.setDefaultAutoSelectFamily(false);
 
 **投递语义**：发送前持久化 in-flight 标记。若发送中断或重启时结果不确定，标记 uncertain 并停止自动重发，需人工核对渠道；多渠道无统一幂等键，不能保证此窗口既不丢又不重。旧 job 不会在升级时自动补发。跟踪期限为 7 天；存在新用户输入时旧后台结果故意不自动转发。关联 agent 被关闭时停止跟踪；本逻辑不阻止 Paseo 的闲置运行时回收，也不能替代 Pi 后台任务自身的存活与唤醒机制。
 
-**验证**：`tests/followup.test.ts` 覆盖通知身份、禁用唤醒和用户输入边界；`tests/followup-bridge.test.ts` 覆盖后台等待、原线程回发、持久化、分页和不确定发送。生产会话时间线只读回放应能识别已知后台通知和最终结果；不依赖平台凭据。
+**验证**：`tests/followup.test.ts` 覆盖通知身份、禁用唤醒、用户输入边界及跨轮继承任务的派发前核销；`tests/followup-bridge.test.ts` 覆盖后台等待、原线程回发、持久化、分页、不确定发送、同 thread 多轮插话 `pendingTasks` 交接、5s 轮询前极速插话游标追平及裸 `!m` 查询不打断。生产会话时间线只读回放应能识别已知后台通知和最终结果；不依赖平台凭据。
+
+**补充（同 thread 中途插话打断长周期后台唤醒）**：
+- **现象**：同一 Slack thread 内已启动 1 小时定时唤醒 `bg_run`，中途用户在同一 thread 发送支线排障消息及后续跟进消息（最后一轮未重新调用 `bg_run`）；1 小时任务到期唤醒后生成的最终汇总只留在 Paseo timeline，未推往 Slack。
+- **根因**：旧逻辑只要同 `conversationKey` 出现后继 Job 就把前序 `followup` 置 `null`，而新 Job 的 `followup` 只从自身 `after` 游标开始且初始 `pendingTasks: []`；若新 Job 本轮无新 `bg_run`，首次 5s 轮询即判定 `finished = true` 关闭 watcher，前序仍在运行的定时任务随之失联。
+- **修复**：保持每会话最多单活跃 watcher 的不变量；同会话同 `agentId` 的新消息完成首轮投递（`completeDelivery`）时，先将前序 `followup` 追平至新消息的 `after` 游标（防止 5s 轮询窗口期漏扫刚启动的 `bg_run`），再将其未消费的 `pendingTasks` 交接给新 Job 的 `followup` 并原子清空旧 `followup`。不向 Agent 派发消息的纯 `!m` 命令及派发前校验失败的请求不打断现有 `followup`。
 
 ## 9. Slack 已重连但管理页持续显示退避
 

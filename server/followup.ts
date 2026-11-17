@@ -28,7 +28,17 @@ export function advanceFollowup(watch: Watch, entries: FollowupEntry[], identity
       }
       continue;
     }
-    if (!watch.originSeen) continue;
+    if (!watch.originSeen) {
+      if (item.type === "tool_call" && item.name === "background-task-notification") {
+        const metadata = record(item.metadata);
+        const task = record(metadata?.details);
+        if (metadata?.synthetic === true && metadata.customType === "background-task-notification"
+          && task?.triggerOnCompletion === true && typeof task.id === "string") {
+          watch.pendingTasks = watch.pendingTasks.filter((id) => id !== task.id);
+        }
+      }
+      continue;
+    }
     if (item.type === "tool_call") {
       const detail = record(item.detail);
       if (item.name === "bg_run" || item.name === "bg_delegate") {

@@ -77,3 +77,33 @@ test("找不到自己的派发消息时不激活任何后台通知", () => {
   assert.deepEqual(w.pendingTasks, []);
   assert.equal(w.candidate, null);
 });
+
+test("继承的待完成任务在本轮派发前已触发通知时自动核销，剩余任务在本轮后正常触发", () => {
+  const w = watch();
+  w.pendingTasks = ["inherited-done", "inherited-pending"];
+  assert.equal(
+    advanceFollowup(
+      w,
+      [
+        entry(1, notification("inherited-done")),
+        entry(2, user("m2")),
+        entry(3, answer("a1", "本轮正常回复")),
+      ],
+      "m2",
+    ),
+    "ok",
+  );
+  assert.equal(w.originSeen, true);
+  assert.deepEqual(w.pendingTasks, ["inherited-pending"]);
+  assert.equal(w.candidate, null);
+  assert.equal(
+    advanceFollowup(
+      w,
+      [entry(4, notification("inherited-pending")), entry(5, answer("a2", "跨轮后台最终回复"))],
+      "m2",
+    ),
+    "ok",
+  );
+  assert.deepEqual(w.pendingTasks, []);
+  assert.deepEqual(w.candidate, { id: "a2", text: "跨轮后台最终回复" });
+});
