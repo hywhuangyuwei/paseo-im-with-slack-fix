@@ -201,6 +201,13 @@ export class Bridge {
     return createProgressSink(this.deps.adapter(), job.chatId, job.threadId ?? undefined, this.deps.log);
   }
 
+  private async startProgress(jobId: string, sink: ProgressSink): Promise<void> {
+    await sink.start();
+    if (sink.messageId && this.deps.state.job(jobId)?.progressMessageId !== sink.messageId) {
+      this.deps.state.updateJob(jobId, { progressMessageId: sink.messageId });
+    }
+  }
+
   private async refreshProgress(jobId: string, sink: ProgressSink, elapsed: number): Promise<void> {
     const mode = this.deps.adapter().capabilities.progress;
     if (mode === "none") return;
@@ -208,6 +215,7 @@ export class Bridge {
       await sink.refresh(elapsed);
       return;
     }
+    if (!sink.messageId) return;
     const current = this.deps.state.job(jobId);
     if (!current || current.delivery === "done") return;
     const activity = await this.describeActivity(current).catch(() => undefined);
@@ -278,9 +286,8 @@ export class Bridge {
       void this.refreshProgress(jobId, sink, elapsed).catch(() => {});
     }, progressIntervalMs);
     try {
-      await sink.start();
-      if (sink.messageId) {
-        state.updateJob(jobId, { progressMessageId: sink.messageId });
+      if (!parseModelCommand(job.text)) {
+        await this.startProgress(jobId, sink);
       }
       const settings = await this.deps.settings();
       const budgetMs = Math.max(60_000, settings.deferTimeoutMinutes * 60_000);
@@ -750,6 +757,7 @@ export class Bridge {
             await this.deps.state.mutate((draft) => { draft.jobs[job.messageId]!.modelChange!.notified = true; });
           }
         }
+        await this.startProgress(job.messageId, sink);
         if (!alreadySent) {
           const after = await this.timelineAfter(agent);
           this.deps.state.updateJob(job.messageId, { dispatch: "sending", after });
@@ -759,6 +767,7 @@ export class Bridge {
         }
         this.deps.state.updateJob(job.messageId, { dispatch: "sent" });
       }
+      await this.startProgress(job.messageId, sink);
       const prior = new Set(this.pendingQuestionIds(job.agentId!));
       const result = await waitForTask(agent, this.deps.signal, async (question) => {
         prior.add(question.requestId);

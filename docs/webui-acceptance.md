@@ -181,3 +181,20 @@ net.setDefaultAutoSelectFamily(false);
 验收脚本位于本机 `~/ws/validation/paseo-im-model/verify-plugin.mjs` 与 `verify-live.mjs`。该验收证明热重载健康及真实 Pi 只读/切换能力，不等于真实 Slack 消息端到端、真实模型正在生成时的实机收发验收；生成中优先回发的排序由未释放模型完成 Promise 的离线回归验证。
 
 Agent participation: autonomous (deployment/push authorized by user); model: `nv-infer/azure/openai/gpt-6.1-sol`。
+
+---
+
+## `!m` 切换回执始终先于响应消息：本机热重载与独立 Pi 验收（2026-11-17）
+
+用户授权 `reload push` 后执行；源码为 `local-im` 本地目录安装，Paseo 0.15.4。
+
+| 项 | 结果 / 边界 |
+| --- | --- |
+| 默认门禁 | 双侧 typecheck；默认测试 131/131、模型命令/桥接/状态恢复定向测试 36/36 |
+| package / runtime / redaction / docs-links / diff | 全部通过 |
+| 热重载 | `paseo plugin reload paseo-im --json`：enabled=true、status=running；未重启 daemon |
+| 插件 RPC 与 Slack 健康 | `verify-plugin.mjs`：im.list=12、Pi choices 可用；Slack running/ready=true、lastError=null、im.test=true |
+| 独立 Pi 模型与隔离 | `verify-live.mjs`：真实 vendor/model 切换读回、裸查询优先回复、同 thread 同 agent、新 thread 默认隔离通过；3 个自建验收 agent 已归档；recorder channel，无模型生成，无真实 Slack 消息 |
+| `edit`/`stream` 进度回执顺序 | 由 `tests/model-bridge.test.ts` 的 `edit`/`stream` 假传输回归验证 `✅` 切换回执排在 `⏳` 进度占位与原位覆写的响应消息之前；未冒充真实 Slack 消息端到端测试 |
+
+Agent participation: autonomous (deployment/push authorized by user); model: `nv-infer/gcp/google/gemini-4-argon`。

@@ -42,7 +42,7 @@
 | --- | --- | --- |
 | `!m` 模糊选择 Pi 模型 | ✅ 回归通过，已部署 | 首行命令；裸 `!m` 只读显示当前/新会话默认模型；带参数按ID/名称分词包含匹配，唯一命中才切换，歧义列候选 |
 | 当前 thread 后续沿用 / 新 thread 隔离 | ✅ 回归通过，已部署 | 只改工作区创建的独占 Pi agent，不改路由 profile；固定/共享 agent 拒绝 |
-| 无正文只切模型 / 切换回执 | ✅ 回归通过，已部署 | 无模型生成；有正文先回执再发送，失败不静默降级 |
+| 无正文只切模型 / 切换回执 | ✅ 回归通过，已部署 | 无模型生成；有正文先回执再创建进度占位并发送正文，确保 `edit`/`stream` 渠道切换回执始终先于响应消息，失败不静默降级 |
 | 忙时队列 / 重载防重 / 超时补发 | ✅ 回归通过，已部署 | 带参数切换等前轮结束；持久化解析结果与 applied/notified，派发 identity 回查；补发只读本命令结果 |
 | 裸 `!m` 优先只读回复 | ✅ 回归及独立 Pi 验收通过，已热重载 | 独立 `model-query` 队列，不等当前模型回答；查询时的实际模型/新会话默认；重载不挤掉未完成模型任务 |
 
@@ -67,10 +67,18 @@
 - 验证：修改前默认门禁 125/125；新增回归在旧代码复现 3 个预期失败（查询阻塞、恢复阻塞、恢复挤掉原任务）。修复后双侧 typecheck 与默认测试 130/130、模型命令/桥接/状态恢复定向测试 35/35 全绿，package/runtime、脱敏/文档链接守卫与 `git diff --check` 通过。文档守卫初次命令误写为 `check-doc-links.mjs`，已以正确的 `check-docs-links.mjs` 补跑通过；不是代码测试失败。用户随后授权 reload and push：已通过 `paseo plugin reload paseo-im --json` 热重载，无 daemon 重启；`im.list=12`、Pi choices 可用、Slack running/ready=true、lastError=null、im.test=true。独立 Pi agent + recorder channel 验证裸查询在普通会话队列释放前投递，无模型生成、无真实 Slack 消息，三个自建验收 agent 已归档；提交/推送获用户授权。根因与回归见 gotchas §12，验收边界见 `docs/webui-acceptance.md`。
 - Agent participation: autonomous (deployment/push authorized by user); model: `nv-infer/azure/openai/gpt-6.1-sol`。
 
+### `!m` 切换回执始终先于响应消息（2026-11-17）
+
+- 修复在 `progress: "edit"`（如 Slack）或 `progress: "stream"` 渠道发送 `!m 关键词\n正文` 时，`deliver()` 提前创建 `⏳ 正在处理…` 进度占位并在回复完成后原位覆写为模型响应，导致响应消息排在 `✅` 模型切换回执之前的问题。
+- 对 `!m` 命令不在 `deliver()` 入口预建进度占位：纯切换与裸查询直接单条回发，无多余占位；带正文的 `!m` 在模型切换确认且 `✅` 回执发出后才启动 `ProgressSink`（含 `dispatch === "sent"` 重载恢复路径）。
+- 验证：修改前新增 `edit`/`stream` 进度模式回归复现首条消息被覆写为模型回复；修复后双侧 `npm run typecheck`、默认 `npm test` 131/131（模型定向 36/36）、`check:package`、`check:runtime`、脱敏与文档链接守卫及 `git diff --check` 全绿。用户授权 reload/push 后执行 `paseo plugin reload paseo-im --json` 热重载成功（`enabled=true`、`status=running`），`verify-plugin.mjs` 确认 `im.list=12`、Pi choices 可用、Slack `running/ready=true`、`lastError=null`、`im.test=true`；`verify-live.mjs` 独立 Pi 验收通过并归档 3 个自建验收 agent。详情见 gotchas §13 与 `docs/webui-acceptance.md`。
+- Agent participation: autonomous (deployment/push authorized by user); model: `nv-infer/gcp/google/gemini-4-argon`。
+
 ## 2. 缺陷修复索引（实机调试全记录，按主题）
 
 | 主题 | 现象 | 根因 | 细节 |
 | --- | --- | --- | --- |
+| `!m` 切换回执晚于模型响应 | 发送 `!m 关键词\n正文` 后，模型回复排在上方，`✅` 切换回执排在下方 | `deliver()` 先 `sink.start()` 发 `⏳` 占位（`msg-1`），再发 `✅` 回执（`msg-2`），最后 `sink.finish()` 原位把 `msg-1` 改成模型回复 | gotchas §13 |
 | 裸 `!m` 回复晚于模型正文 | 模型仍在生成时，查询当前模型也等待 | 只读分支绕过 agent 队列，但外层仍共用 conversation 队列 | gotchas §12 |
 | Slack dm 归档未匹配 | ls 明明有 Slack dm agent，但脚本 connections=0 | 将 agent 名称条件误放在连接名称上，CLI name 实际对应 agent.title | gotchas §11 |
 | Slack 重连状态卡住 | 已恢复收发仍显示断开/退避 | Manager 只在首次 start 完成后清错，后续 hello 没有状态通知 | gotchas §9 |

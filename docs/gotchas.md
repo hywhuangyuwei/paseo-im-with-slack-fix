@@ -205,3 +205,13 @@ net.setDefaultAutoSelectFamily(false);
 **修复**：仅将无关键词、无正文的首行裸 `!m` 放入独立 `model-query:` 会话队列，沿用授权、去重、原 thread 回发、持久化及超时流程；带参数切换和普通消息仍严格串行。重载同样分离查询与普通任务的最新 job。查询返回执行时实际模型，不等待已排队切换，不中断任务、不向模型发送 prompt。
 
 **验证**：`tests/model-bridge.test.ts` 用未释放的模型完成 Promise 验证裸查询已投递、原模型任务仍未结束、已排队切换未执行、查询原 thread/reply 引用与去重不变；另覆盖忙时重载恢复与未授权查询。`tests/state-store.test.ts` 覆盖未完成查询与原模型任务分别恢复。门禁结果见 `docs/status.md`；用户授权后已热重载。独立 Pi agent + recorder channel 实机读取当前模型，并人为阻塞 conversation 队列验证裸查询先投递；无模型生成，自建 agent 已归档。Slack 健康检查通过，但真实 Slack 消息端到端未测。
+
+## 13. 带正文的 `!m` 切换回执排在模型响应消息之后
+
+**现象**：在 Slack 等支持原位编辑（`progress: "edit"`）或流式消息（`progress: "stream"`）的渠道发送 `!m 关键词\n正文` 时，线程中模型对正文的响应消息显示在第一条，而 `✅ 本 thread 后续使用 Pi 模型：…` 切换回执显示在响应消息下方，造成「首轮回复后才切模型」的错觉。
+
+**根因**：`Bridge.deliver()` 在进入 `answer()` 前无条件调用 `sink.start()`，先在渠道内发出了 `⏳ 正在处理…` 进度占位（或开启流式消息，`msg-1`）；随后 `answer()` 完成模型切换并调用 `sendText()` 发送 `✅` 切换回执（`msg-2`，时间戳晚于 `msg-1`）；待模型生成完毕后，`sink.finish()` 将首块回复原位编辑进 `msg-1`，导致最终响应消息位于 `msg-1`（排在 `msg-2` 切换回执之前）。旧单测夹具将 `capabilities.progress` 设为 `"none"`，`sink.start()`/`finish()` 未创建占位消息，因而未暴露该时序倒置。
+
+**修复**：`deliver()` 入口对 `!m` 命令不再提前启动 `ProgressSink`，且 `refreshProgress()` 在进度消息尚未创建前不触发刷新；纯 `!m` 切换与裸 `!m` 查询直接发送单条回执，不再产生多余的 `⏳` 占位；带正文的 `!m` 在模型切换确认且 `✅` 回执发送成功后再调用 `startProgress()` 创建进度占位（含 `dispatch === "sent"` 的重载恢复路径），保证切换回执始终先于进度占位与最终响应消息发出。
+
+**验证**：`tests/model-bridge.test.ts` 新增 `edit` 与 `stream` 进度模式回归，覆盖切换回执先于进度占位与分段响应、纯切换/裸查询无多余占位、以及切换被拒时不残留孤儿进度消息。

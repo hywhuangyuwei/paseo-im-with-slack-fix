@@ -412,6 +412,89 @@ test("slow catalog before agent binding also retains deferred command receipt", 
   t.mock.timers.reset();
 });
 
+test("edit and stream progress channels keep model switch receipt before progress placeholder and final response", async (t) => {
+  for (const progressMode of ["edit", "stream"] as const) {
+    const h = await fixture(t);
+    const timeline: { id: string; text: string; threadId?: string }[] = [];
+    let nextId = 0;
+    const baseAdapter = h.deps.adapter();
+    h.deps.adapter = () => ({
+      ...baseAdapter,
+      capabilities: { ...baseAdapter.capabilities, progress: progressMode, maxChunkChars: 18 },
+      sendText: async (out) => {
+        const id = `msg-${++nextId}`;
+        timeline.push({ id, text: out.text, threadId: out.threadId });
+        h.sent.push(out);
+        h.events.push(`sendText:${id}:${out.text}`);
+        return { messageId: id };
+      },
+      editMessage: async (id, _chatId, text) => {
+        const item = timeline.find((entry) => entry.id === id);
+        assert.ok(item, `missing message ${id} to edit`);
+        item.text = text;
+        h.events.push(`edit:${id}:${text}`);
+      },
+      streamStart: async (_chatId, threadId) => {
+        const id = `stream-${++nextId}`;
+        timeline.push({ id, text: "…", threadId });
+        h.events.push(`streamStart:${id}`);
+        return { streamId: id };
+      },
+      streamAppend: async (id, text) => {
+        const item = timeline.find((entry) => entry.id === id);
+        assert.ok(item, `missing stream ${id} to append`);
+        item.text = text;
+        h.events.push(`streamAppend:${id}:${text}`);
+      },
+      streamFinish: async (id, text) => {
+        const item = timeline.find((entry) => entry.id === id);
+        assert.ok(item, `missing stream ${id} to finish`);
+        item.text = text;
+        h.events.push(`streamFinish:${id}:${text}`);
+        return { messageId: id };
+      },
+    });
+
+    await h.send("m1", "!m argon\nMESSAGE");
+    assert.equal(timeline.length, 3, `expected switch receipt + 2 response chunks for ${progressMode}`);
+    assert.match(timeline[0]!.text, /^✅ 本 thread 后续使用 Pi 模型：gateway\/argon/);
+    assert.equal(`${timeline[1]!.text}${timeline[2]!.text}`, `answer:agent-1:${NEW_MODEL}`);
+    assert.ok(timeline.every((entry) => entry.threadId === "thread-1"));
+    assert.equal(h.state.job("m1")?.progressMessageId, timeline[1]!.id);
+    const receiptEvent = h.events.findIndex((event) => event.startsWith("sendText:msg-1:✅"));
+    const progressEvent = h.events.findIndex((event) =>
+      progressMode === "edit" ? event.startsWith("sendText:msg-2:⏳") : event === "streamStart:stream-2",
+    );
+    const promptEvent = h.events.indexOf(`send:agent-1:${NEW_MODEL}:MESSAGE`);
+    assert.ok(receiptEvent >= 0 && receiptEvent < progressEvent && progressEvent < promptEvent);
+
+    // Command-only switch and bare query never create a progress placeholder or stream.
+    let maxChunkChars = 4000;
+    const baseGetAdapter = h.deps.adapter;
+    h.deps.adapter = () => {
+      const current = baseGetAdapter();
+      return { ...current, capabilities: { ...current.capabilities, maxChunkChars } };
+    };
+    const eventsBeforeCommandOnly = h.events.length;
+    await h.send("m2", "!m sol a");
+    assert.equal(timeline.length, 4);
+    assert.match(timeline[3]!.text, /^✅ 本 thread 后续使用 Pi 模型：cloud\/sol-a/);
+    await h.send("m3", "!m");
+    assert.equal(timeline.length, 5);
+    assert.equal(timeline[4]!.text, "当前模型：pi/cloud/sol-a");
+    assert.equal(
+      h.events.slice(eventsBeforeCommandOnly).some((event) => event.includes("⏳") || event.startsWith("streamStart:")),
+      false,
+    );
+
+    // Rejected switch must not leave an abandoned progress placeholder above the error.
+    const beforeReject = timeline.length;
+    await h.send("m4", "!m nope\nbody");
+    assert.equal(timeline.length, beforeReject + 1);
+    assert.match(timeline.at(-1)!.text, /没有找到匹配/);
+  }
+});
+
 test("deferred switch rejection is delivered and remains recoverable after reload", async (t) => {
   const h = await fixture(t);
   await h.send("m1", "first");
