@@ -156,6 +156,71 @@ test("bare !m reports the switched model without discovery, switch, or generatio
   assert.equal(h.state.job("m2")?.agentId, "agent-1");
 });
 
+test("bare !m replies before a running model answer and bypasses queued switches", async (t) => {
+  const h = await fixture(t);
+  await h.send("m1", "first");
+  const agent = h.agents.get("agent-1")!;
+  const originalWait = agent.waitForFinish;
+  const gate = Promise.withResolvers<Awaited<ReturnType<typeof originalWait>>>();
+  const entered = Promise.withResolvers<void>();
+  agent.waitForFinish = () => { entered.resolve(); return gate.promise; };
+  await h.bridge.handle(h.message("m2", "slow prompt"));
+  await entered.promise;
+  agent.snapshot.activeTurn = true;
+  try {
+    await h.bridge.handle(h.message("m3", "!m argon\nnext prompt"));
+    await h.bridge.handle(h.message("m4", "!m"));
+    // A barrier on the read-only lane proves delivery without releasing the
+    // model turn. It also fails deterministically if the query is queued wrong.
+    await h.queue.run("model-query:dm:chat-1:thread-1", async () => {});
+    assert.equal(h.state.job("m4")?.delivery, "done");
+    assert.equal(h.sent.at(-1)!.text, `当前模型：pi/${DEFAULT_MODEL}`);
+    assert.equal(h.sent.at(-1)!.replyToId, "m4");
+    assert.equal(h.sent.at(-1)!.threadId, "thread-1");
+    assert.equal(h.state.job("m2")?.delivery, null);
+    assert.equal(h.state.job("m3")?.modelChange, undefined);
+    assert.equal(h.events.some(event => event.startsWith("model:")), false);
+    assert.equal(agent.snapshot.activeTurn, true);
+    assert.deepEqual(h.events.filter(event => event.startsWith("send:")), [
+      `send:agent-1:${DEFAULT_MODEL}:first`, `send:agent-1:${DEFAULT_MODEL}:slow prompt`,
+    ]);
+  } finally {
+    agent.snapshot.activeTurn = false;
+    agent.waitForFinish = originalWait;
+    gate.resolve({ status: "idle", final: null, error: null, lastMessage: "slow answer" });
+    await h.queue.idle();
+  }
+  assert.ok(h.sent.findIndex(out => out.replyToId === "m4") < h.sent.findIndex(out => out.text === "slow answer"));
+  assert.ok(h.events.includes(`send:agent-1:${NEW_MODEL}:next prompt`));
+  const sentCount = h.sent.length;
+  await h.send("m4", "!m");
+  assert.equal(h.sent.length, sentCount);
+});
+
+test("bare !m reload recovery bypasses a busy conversation without prompting", async (t) => {
+  const h = await fixture(t);
+  await h.send("m1", "!m argon");
+  await h.send("m2", "!m");
+  h.state.updateJob("m2", { delivery: null, answer: null });
+  await h.state.drain();
+  await h.state.load();
+  const before = h.events.filter(event => event.startsWith("model:") || event.startsWith("send:"));
+  const gate = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  const busy = h.queue.run("conversation:dm:chat-1:thread-1", async () => { entered.resolve(); await gate.promise; });
+  await entered.promise;
+  const recovered = h.bridge.rerunQueued("m2");
+  try {
+    await h.queue.run("model-query:dm:chat-1:thread-1", async () => {});
+    assert.equal(h.state.job("m2")?.delivery, "done");
+    assert.equal(h.sent.at(-1)!.text, `当前模型：pi/${NEW_MODEL}`);
+    assert.deepEqual(h.events.filter(event => event.startsWith("model:") || event.startsWith("send:")), before);
+  } finally {
+    gate.resolve();
+    await Promise.all([busy, recovered]);
+  }
+});
+
 test("bare !m can query a fixed/shared chat without changing it", async (t) => {
   const h = await fixture(t);
   await h.send("m1", "!m argon");
@@ -255,6 +320,16 @@ test("unauthorized !m never queries or switches", async (t) => {
   await h.send("m1", "!m argon\nbody");
   assert.equal(h.agents.size, 0);
   assert.equal(h.state.job("m1"), undefined);
+});
+
+test("unauthorized bare !m never reaches the read-only lane or daemon", async (t) => {
+  const h = await fixture(t);
+  h.config.policy.directMessages = "operators";
+  h.deps.daemon = async () => { assert.fail("unauthorized query accessed daemon"); };
+  await h.send("m1", "!m");
+  assert.equal(h.state.job("m1"), undefined);
+  assert.equal(h.agents.size, 0);
+  assert.equal(h.sent.some(out => out.text.startsWith("当前模型")), false);
 });
 
 test("reload recovery preserves applied command-only model and does not send a prompt", async (t) => {

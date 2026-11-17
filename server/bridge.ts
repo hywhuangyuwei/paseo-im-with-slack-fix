@@ -19,7 +19,7 @@ import { isAuthorized, deniedHint } from "./policy.ts";
 import { createProgressSink, type ProgressSink } from "./progress.ts";
 import { CONNECTION_LABEL, CONVERSATION_LABEL, Router } from "./routing.ts";
 import { mapProviderChoices } from "./choices.ts";
-import { parseModelCommand, resolvePiModel } from "./model-command.ts";
+import { deliveryQueueKey, parseModelCommand, resolvePiModel } from "./model-command.ts";
 import type { Job, StateStore } from "./state-store.ts";
 import { advanceFollowup } from "./followup.ts";
 
@@ -191,7 +191,7 @@ export class Bridge {
       if (conversation) conversation.updatedAt = now;
     });
     this.deps.queue.run(
-      `conversation:${keyOf(message)}`,
+      deliveryQueueKey(keyOf(message), message.text),
       () => this.deliver(message.messageId),
       this.deps.signal,
     );
@@ -388,7 +388,7 @@ export class Bridge {
       this.deps.state.updateJob(jobId, { agentId: null, routeKey: null });
     }
     await this.deps.queue.run(
-      `conversation:${job.conversationKey}`,
+      deliveryQueueKey(job.conversationKey, job.text),
       () => this.deliver(jobId),
       this.deps.signal,
     );

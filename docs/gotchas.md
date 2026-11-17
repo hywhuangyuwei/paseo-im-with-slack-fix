@@ -195,3 +195,13 @@ net.setDefaultAutoSelectFamily(false);
 **修复**：从 `channel=slack` 的连接获取 state，以 `agent.title` 不区分大小写同时命中 Slack/dm，并保留连接/会话标签及全部闲置/在途保护。归档前重新检查标题，避免改名后继续归档；日志区分 `matched` 和 `eligible`。
 
 **验证**：fixture 覆盖连接名不带 dm 仍发现 agent、大小写/顺序/缺失标题、非关联标签、闲置保护；隔离 fake CLI 子进程回归覆盖 dry-run、无 --force 的假归档和中途改名跳过。生产仅运行 dry-run，不记录真实聊天标识、不真实归档。
+
+## 12. 裸 `!m` 查询被正在生成的模型回复挡住
+
+**现象**：在同 thread 发送裸 `!m` 查询当前模型，但查询回执等到正在生成的实际模型回答之后才出现。
+
+**根因**：`answer()` 的裸查询分支虽不入 `agent:` 队列，`handle()` 与 `rerunQueued()` 外层仍将所有消息放入同一个 `conversation:` 队列，前一轮 `deliver()` 等待模型并发送回答期间会阻塞只读查询。将查询并行化后还必须处理重载：只按会话选最新冻结 job 会让未完成查询覆盖原模型任务。
+
+**修复**：仅将无关键词、无正文的首行裸 `!m` 放入独立 `model-query:` 会话队列，沿用授权、去重、原 thread 回发、持久化及超时流程；带参数切换和普通消息仍严格串行。重载同样分离查询与普通任务的最新 job。查询返回执行时实际模型，不等待已排队切换，不中断任务、不向模型发送 prompt。
+
+**验证**：`tests/model-bridge.test.ts` 用未释放的模型完成 Promise 验证裸查询已投递、原模型任务仍未结束、已排队切换未执行、查询原 thread/reply 引用与去重不变；另覆盖忙时重载恢复与未授权查询。`tests/state-store.test.ts` 覆盖未完成查询与原模型任务分别恢复。门禁结果见 `docs/status.md`；用户授权后已热重载。独立 Pi agent + recorder channel 实机读取当前模型，并人为阻塞 conversation 队列验证裸查询先投递；无模型生成，自建 agent 已归档。Slack 健康检查通过，但真实 Slack 消息端到端未测。

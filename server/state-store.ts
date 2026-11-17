@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { atomicWrite, readJson, WriteChain } from "./files.ts";
 import { connectionRoot } from "./paths.ts";
+import { deliveryQueueKey } from "./model-command.ts";
 import { join } from "node:path";
 
 const seenCap = 1000;
@@ -188,16 +189,18 @@ export class StateStore {
 
   /** Frozen by a reload abort: delivered-never (dispatch null or "sending",
    * killed in the conversation/agent queue or before the sent mark) and
-   * dispatched-never-answered (dispatch "sent"). Newest per conversation —
-   * older ones are superseded by the conversation's later answer. Jobs with a
-   * pending question are excluded: they await user input, not delivery. */
+   * dispatched-never-answered (dispatch "sent"). Newest per delivery lane —
+   * older model jobs are superseded by the conversation's later answer, but
+   * read-only model queries cannot supersede unfinished model work. Jobs with
+   * a pending question await user input, not delivery, and are excluded. */
   resumableJobs(): Job[] {
     const picked = new Map<string, Job>();
     for (const job of Object.values(this.state.jobs)) {
       if (job.delivery !== null || job.failure !== null || job.question !== null) continue;
-      const current = picked.get(job.conversationKey);
+      const key = deliveryQueueKey(job.conversationKey, job.text);
+      const current = picked.get(key);
       // <= : same-millisecond ties break by insertion (arrival) order.
-      if (!current || current.createdAt <= job.createdAt) picked.set(job.conversationKey, job);
+      if (!current || current.createdAt <= job.createdAt) picked.set(key, job);
     }
     return [...picked.values()];
   }

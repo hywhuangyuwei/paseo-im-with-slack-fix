@@ -95,6 +95,24 @@ test("resumableJobs 取每会话最新冻结 job，排除已送达/已失败/待
   });
 });
 
+test("resumableJobs restores model queries separately from unfinished model turns", async () => {
+  await withStore(async (store) => {
+    const jobs = [["turn", "prompt", 1], ["switch", "!m argon", 2],
+      ["query-old", "!m", 3], ["query-new", "  !M  \n", 4]] as const;
+    for (const [id, text, createdAt] of jobs) {
+      store.ensureJob(id, { messageId: id, conversationKey: "dm:a", chatId: "a", senderId: "a", createdAt, text });
+      store.updateJob(id, { createdAt });
+    }
+    await store.drain();
+    await store.load();
+    assert.deepEqual(store.resumableJobs().map(job => job.messageId), ["switch", "query-new"]);
+    store.updateJob("switch", { delivery: "done" });
+    // An unanswered read-only query must not hide a dispatched model task.
+    store.updateJob("turn", { dispatch: "sent" });
+    assert.deepEqual(store.resumableJobs().map(job => job.messageId), ["turn", "query-new"]);
+  });
+});
+
 test("seen 环形去重上限 1000", async () => {
   await withStore(async (store) => {
     for (let i = 0; i < 1_100; i += 1) store.markSeen(`m-${i}`);

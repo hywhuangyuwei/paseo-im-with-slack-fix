@@ -14,6 +14,14 @@ export function parseModelCommand(text: string | null | undefined): ModelCommand
   return match ? { query: (match[1] ?? "").trim(), body: rest.join("\n").trim() } : null;
 }
 
+/** Only a bare read-only query may bypass model work; switches stay ordered.
+ * Recovery uses the same lane so a query cannot supersede an unfinished turn. */
+export function deliveryQueueKey(conversationKey: string, text: string | null | undefined): string {
+  const command = parseModelCommand(text);
+  const lane = command && !command.query && !command.body ? "model-query" : "conversation";
+  return `${lane}:${conversationKey}`;
+}
+
 /** Exact ID first; otherwise every whitespace-separated term must be a substring. */
 export function resolvePiModel(query: string, providers: ProviderChoice[]): { id: string; label: string } {
   if (!query) throw new UserFacingError("用法：!m 模型关键词（例如 !m argon、!m sol a、!m 4.1 local）；正文可从下一行开始。模型未修改。");

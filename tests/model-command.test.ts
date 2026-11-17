@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseModelCommand, resolvePiModel } from "../server/model-command.ts";
+import { deliveryQueueKey, parseModelCommand, resolvePiModel } from "../server/model-command.ts";
 import { mapProviderChoices } from "../server/choices.ts";
 
 const providers = mapProviderChoices([
@@ -22,6 +22,16 @@ test("!m first-line parsing: body, no body, CRLF, whitespace, case", () => {
   for (const text of [null, "hello\n!m argon", "```\n!m argon\n```", "!model argon", "!more", "!m/argon", ""]) {
     assert.equal(parseModelCommand(text), null);
   }
+});
+
+test("only a bare model query gets an independent delivery lane", () => {
+  for (const text of ["!m", "  !M\t  \r\n\r\n"]) {
+    assert.equal(deliveryQueueKey("dm:chat:thread", text), "model-query:dm:chat:thread");
+  }
+  for (const text of [null, "", "ordinary", "!m argon", "!m argon\nbody", "!m\nbody", "text\n!m", "```\n!m\n```", "!model"]) {
+    assert.equal(deliveryQueueKey("dm:chat:thread", text), "conversation:dm:chat:thread");
+  }
+  assert.equal(deliveryQueueKey("dm:other:thread", "!m"), "model-query:dm:other:thread");
 });
 
 test("simple case-insensitive all-term substring matching on Pi ID and label", () => {

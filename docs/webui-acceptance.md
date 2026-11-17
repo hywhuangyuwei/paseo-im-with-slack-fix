@@ -161,3 +161,23 @@ net.setDefaultAutoSelectFamily(false);
 ### 配对渠道自动进入修复（同日）
 
 微信/WhatsApp/企微创建连接后自动拉起扫码配对（二维码直出）；接入表单「扫码配对」行提示改为准确描述。微信 iLink 配对会话已实测：`start()`→`poll()` 返回 `pending` + 二维码 dataURL（30s 长轮询为协议设计）。
+
+---
+
+## 裸 `!m` 优先查询：本机热重载与独立 Pi 验收
+
+用户授权 `reload and push` 后执行；源码为 `local-im` 本地目录安装，Paseo 0.15.4。
+
+| 项 | 结果 / 边界 |
+| --- | --- |
+| 默认门禁 | 双侧 typecheck；默认测试 130/130、模型命令/桥接/状态恢复定向测试 35/35 |
+| package / runtime / redaction / docs-links / diff | 全部通过；链接脚本实际名称为 `scripts/check-docs-links.mjs` |
+| 热重载 | `paseo plugin reload paseo-im --json`：enabled=true、status=running；未重启 daemon |
+| 插件 RPC 与 Slack 健康 | im.list=12、Pi choices 可用；Slack running/ready=true、lastError=null、im.test=true |
+| 独立 Pi 模型与隔离 | 真实 vendor/model 切换读回；同 thread 同 agent、新 thread 保持默认；纯命令 timeline 无 user_message |
+| 裸查询优先回复 | 人为持有 `conversation:` 队列 gate；裸 `!m` 通过 `model-query:` 队列读取真实 Pi snapshot，在 gate 释放前 delivery=done，原 thread/reply 引用正确 |
+| 清理与发送范围 | 三个自建验收 agent 已归档；recorder channel，无模型生成，无真实 Slack 消息；未改现有 IM 聊天模型 |
+
+验收脚本位于本机 `~/ws/validation/paseo-im-model/verify-plugin.mjs` 与 `verify-live.mjs`。该验收证明热重载健康及真实 Pi 只读/切换能力，不等于真实 Slack 消息端到端、真实模型正在生成时的实机收发验收；生成中优先回发的排序由未释放模型完成 Promise 的离线回归验证。
+
+Agent participation: autonomous (deployment/push authorized by user); model: `nv-infer/azure/openai/gpt-6.1-sol`。
