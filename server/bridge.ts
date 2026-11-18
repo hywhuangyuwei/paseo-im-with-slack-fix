@@ -19,7 +19,13 @@ import { isAuthorized, deniedHint } from "./policy.ts";
 import { createProgressSink, type ProgressSink } from "./progress.ts";
 import { CONNECTION_LABEL, CONVERSATION_LABEL, Router } from "./routing.ts";
 import { mapProviderChoices } from "./choices.ts";
-import { deliveryQueueKey, parseModelCommand, resolvePiModel } from "./model-command.ts";
+import {
+  deliveryQueueKey,
+  formatCurrentModelNotice,
+  formatModelSwitchNotice,
+  parseModelCommand,
+  resolvePiModel,
+} from "./model-command.ts";
 import type { Job, StateStore } from "./state-store.ts";
 import { advanceFollowup } from "./followup.ts";
 
@@ -650,7 +656,7 @@ export class Bridge {
         if (snapshot && !snapshot.agent.archivedAt) {
           this.deps.state.updateJob(job.messageId, { agentId: known, routeKey: job.conversationKey });
           const model = snapshot.agent.runtimeInfo?.model;
-          return `当前模型：${snapshot.agent.provider}/${model || "默认（尚未解析）"}`;
+          return formatCurrentModelNotice(model, snapshot.agent.provider);
         }
       }
       if (target?.kind === "workspace") return `当前模型（新会话默认）：${target.profile.provider}`;
@@ -743,7 +749,7 @@ export class Bridge {
             }
             await this.deps.state.mutate((draft) => { draft.jobs[job.messageId]!.modelChange!.applied = true; });
           }
-          const notice = `✅ 本 thread 后续使用 Pi 模型：${change.modelId}。新 thread 不受影响。`;
+          const notice = formatModelSwitchNotice(change.modelId);
           if (!command.body) return notice;
           if (!change.notified) {
             // Do not execute the body silently if the receipt cannot be delivered.

@@ -6,6 +6,14 @@ export interface ModelCommand {
   body: string;
 }
 
+export function formatCurrentModelNotice(modelId: string | null | undefined, provider = "pi"): string {
+  return `当前模型：${provider}/${modelId || "默认（尚未解析）"}`;
+}
+
+export function formatModelSwitchNotice(modelId: string): string {
+  return `✅ 已切换模型：${modelId}`;
+}
+
 /** Only a first-line !m is control input; prose and fenced examples stay intact. */
 export function parseModelCommand(text: string | null | undefined): ModelCommand | null {
   if (!text) return null;

@@ -457,7 +457,7 @@ test("edit and stream progress channels keep model switch receipt before progres
 
     await h.send("m1", "!m argon\nMESSAGE");
     assert.equal(timeline.length, 3, `expected switch receipt + 2 response chunks for ${progressMode}`);
-    assert.match(timeline[0]!.text, /^✅ 本 thread 后续使用 Pi 模型：gateway\/argon/);
+    assert.equal(timeline[0]!.text, "✅ 已切换模型：gateway/argon");
     assert.equal(`${timeline[1]!.text}${timeline[2]!.text}`, `answer:agent-1:${NEW_MODEL}`);
     assert.ok(timeline.every((entry) => entry.threadId === "thread-1"));
     assert.equal(h.state.job("m1")?.progressMessageId, timeline[1]!.id);
@@ -478,7 +478,7 @@ test("edit and stream progress channels keep model switch receipt before progres
     const eventsBeforeCommandOnly = h.events.length;
     await h.send("m2", "!m sol a");
     assert.equal(timeline.length, 4);
-    assert.match(timeline[3]!.text, /^✅ 本 thread 后续使用 Pi 模型：cloud\/sol-a/);
+    assert.equal(timeline[3]!.text, "✅ 已切换模型：cloud/sol-a");
     await h.send("m3", "!m");
     assert.equal(timeline.length, 5);
     assert.equal(timeline[4]!.text, "当前模型：pi/cloud/sol-a");

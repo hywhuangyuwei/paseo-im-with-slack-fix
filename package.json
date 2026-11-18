@@ -55,6 +55,11 @@
     "npm-shrinkwrap.json",
     "package-lock.json"
   ],
+  "pi": {
+    "extensions": [
+      "./server/pi-model-extension.ts"
+    ]
+  },
   "engines": {
     "node": ">=22.18.0"
   },

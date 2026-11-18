@@ -74,6 +74,11 @@
 - 验证：修改前新增 `edit`/`stream` 进度模式回归复现首条消息被覆写为模型回复；修复后双侧 `npm run typecheck`、默认 `npm test` 131/131（模型定向 36/36）、`check:package`、`check:runtime`、脱敏与文档链接守卫及 `git diff --check` 全绿。用户授权 reload/push 后执行 `paseo plugin reload paseo-im --json` 热重载成功（`enabled=true`、`status=running`），`verify-plugin.mjs` 确认 `im.list=12`、Pi choices 可用、Slack `running/ready=true`、`lastError=null`、`im.test=true`；`verify-live.mjs` 独立 Pi 验收通过并归档 3 个自建验收 agent。详情见 gotchas §13 与 `docs/webui-acceptance.md`。
 - Agent participation: autonomous (deployment/push authorized by user); model: `nv-infer/gcp/google/gemini-4-argon`。
 
+### Pi 扩展版 `!m` 与统一精简切换提示（`feat/pi-model-command` 分支）
+
+- 新增 `server/pi-model-extension.ts`（并在 `package.json` 声明 `pi.extensions`），通过 `pi.on("input")` 拦截首行 `!m`，使非 IM 的 Paseo / Pi 会话同样支持裸 `!m` 查询、`!m 关键词` 纯切换及 `!m 关键词\n正文` 当轮切换。
+- 精简并统一 IM 桥接（`server/bridge.ts`）与 Pi 扩展（`server/pi-model-extension.ts`）的切换提示为 `formatModelSwitchNotice(modelId)`：`✅ 已切换模型：<modelId>`。
+
 ## 2. 缺陷修复索引（实机调试全记录，按主题）
 
 | 主题 | 现象 | 根因 | 细节 |

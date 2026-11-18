@@ -68,7 +68,9 @@ Bare `!m` reports the current model without switching or generating a reply. Bef
 
 Keywords are case-insensitive substrings of the Pi model ID/name; every whitespace-separated term must match. Exact IDs take precedence. Only a unique match switches the model; ambiguous results list candidates and do not dispatch the prompt.
 
-A successful switch is acknowledged in the same thread before any prompt is sent. A command without a prompt does not start a generation. Later messages in this thread keep the selected model; new threads use the unchanged workspace defaults. Only workspace-created, thread-owned Pi agents are supported; fixed/shared chats are rejected to avoid affecting other threads. Requests queue behind current work, preserve the agent/history, and respect existing authorization/mention policies.
+A successful switch is acknowledged in the same thread (`✅ 已切换模型：<modelId>`) before any prompt is sent. A command without a prompt does not start a generation. Later messages in this thread keep the selected model; new threads use the unchanged workspace defaults. Only workspace-created, thread-owned Pi agents are supported; fixed/shared chats are rejected to avoid affecting other threads. Requests queue behind current work, preserve the agent/history, and respect existing authorization/mention policies.
+
+For IM-independent Paseo / Pi sessions, `server/pi-model-extension.ts` provides a Pi extension sharing the same `!m` parser, model matcher, and switch notice (`✅ 已切换模型：<modelId>`).
 
 ## Access & security
 
