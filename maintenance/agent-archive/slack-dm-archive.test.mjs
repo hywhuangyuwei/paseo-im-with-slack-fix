@@ -46,7 +46,25 @@ assert.ok(check({...base,status:'idle'}));
 assert.ok(check({...base,updatedAt:'2026-11-12T15:00:00Z'}));
 assert.ok(!check({...base,updatedAt:'2026-11-12T15:00:01Z'}));
 for (const status of ['running','initializing','error']) assert.ok(!check({...base,status}));
-assert.ok(!check({...base,requiresAttention:true}));
+// Attention flags/reasons/timestamps do not affect archival eligibility.
+for (const attention of [
+  {requiresAttention:true, attentionReason:'finished', attentionTimestamp:'2026-11-13T14:59:59Z'},
+  {requiresAttention:true, attentionReason:'permission', attentionTimestamp:'invalid'},
+  {requiresAttention:true, attentionReason:'error'},
+  {requiresAttention:null},
+  {requiresAttention:undefined},
+]) {
+  assert.ok(check({...base,...attention}));
+  // Ignoring attention never bypasses real activity, lifecycle or job protections.
+  assert.ok(!check({...base,...attention,status:'running'}));
+  assert.ok(!check({...base,...attention,updatedAt:'2026-11-13T14:59:59Z'}));
+  assert.ok(!eligible({...base,...attention},state,id,now,new Set(['old'])));
+  assert.ok(!check({...base,...attention},{...state,jobs:{a:{agentId:'old',delivery:'uncertain'}}}));
+  for (const override of [{followup:{}}, {question:{status:'pending'}}, {updatedAt:now-1000}]) {
+    assert.ok(!check({...base,...attention},{...state,jobs:{a:{agentId:'old',delivery:'done',updatedAt:now-2*86400000,...override}}}));
+  }
+  assert.ok(!check({...base,...attention},{...state,conversations:{'dm:123:456':{agentId:'old',updatedAt:now-1000}}}));
+}
 assert.ok(!check({...base,archivedAt:'2026-11-12T01:00:00Z'}));
 assert.ok(!check({...base,labels:{...base.labels,'im/connection':'other'}}));
 assert.ok(!check({...base,labels:{'im/connection':id}}));
@@ -81,7 +99,7 @@ test('CLI: connection without dm discovers agent titles; dry-run and pre-archive
     await writeFile(join(cli, 'utils/client.js'), 'export async function connectToDaemon() { return {close:async()=>{}}; }');
     const oldId = '3e8a9171-d203-4a49-b141-25003375759d';
     const recentId = '4e8a9171-d203-4a49-b141-25003375759d';
-    const old = {...base, id:oldId};
+    const old = {...base, id:oldId, requiresAttention:true, attentionReason:'finished', attentionTimestamp:'invalid'};
     const recent = {...base, id:recentId, updatedAt:new Date().toISOString()};
     // Misleading titles on another connection, or missing title, must not match.
     const unrelated = {...base, id:'unrelated', labels:{...base.labels,'im/connection':'other'}};

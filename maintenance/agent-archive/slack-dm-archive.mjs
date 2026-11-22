@@ -50,13 +50,13 @@ export function explicitTargetIds(config, connection) {
 export function eligible(agent, state, connection, now = Date.now(), explicitTargets = new Set()) {
   if (!matchesAgentTitle(agent) || explicitTargets.has(agent.id) || agent.archivedAt || agent.labels?.['im/connection'] !== connection ||
       typeof agent.labels?.['im/conversation'] !== 'string' ||
-      !['idle', 'closed'].includes(agent.status) || agent.requiresAttention !== false) return false;
-  // Treat metadata updates, messages, and attention as activity; missing/invalid
-  // updatedAt is unsafe rather than a reason to assume the agent is old.
+      !['idle', 'closed'].includes(agent.status)) return false;
+  // Attention flags and timestamps are not archival filters. Treat metadata
+  // updates and messages as activity; missing/invalid updatedAt is unsafe.
   const updated = Date.parse(agent.updatedAt);
   if (!Number.isFinite(updated)) return false;
   let latest = updated;
-  for (const field of ['createdAt', 'lastUserMessageAt', 'attentionTimestamp']) {
+  for (const field of ['createdAt', 'lastUserMessageAt']) {
     if (agent[field] != null) {
       const t = Date.parse(agent[field]);
       if (!Number.isFinite(t)) return false;

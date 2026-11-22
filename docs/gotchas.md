@@ -215,3 +215,13 @@ net.setDefaultAutoSelectFamily(false);
 **修复**：`deliver()` 入口对 `!m` 命令不再提前启动 `ProgressSink`，且 `refreshProgress()` 在进度消息尚未创建前不触发刷新；纯 `!m` 切换与裸 `!m` 查询直接发送单条回执，不再产生多余的 `⏳` 占位；带正文的 `!m` 在模型切换确认且 `✅` 回执发送成功后再调用 `startProgress()` 创建进度占位（含 `dispatch === "sent"` 的重载恢复路径），保证切换回执始终先于进度占位与最终响应消息发出。
 
 **验证**：`tests/model-bridge.test.ts` 新增 `edit` 与 `stream` 进度模式回归，覆盖切换回执先于进度占位与分段响应、纯切换/裸查询无多余占位、以及切换被拒时不残留孤儿进度消息。
+
+## 14. Slack dm 已结束 agent 被 attention 标记长期挡住归档
+
+**现象**：定时归档成功执行，但部分 agent 在结束很久后仍不被选中；目录中它们带有 `requiresAttention=true`、`attentionReason=finished`。
+
+**根因**：Paseo 可在运行结束时设置 `finished` 关注标记，而原归档规则要求 `requiresAttention` 严格为 false；即使目录元数据超过 24 小时，这一标记仍会阻挡归档。
+
+**修复**：按用户要求完全移除 attention 的标记、原因与时间筛选；24 小时的元数据/消息/IM 活动检查，以及状态、显式绑定、投递、followup、未回答问题和操作前复查均保留。不再使用 attention 保护意味着标为未读、错误或待授权的 agent 也可能被归档；历史文件保留，但旧 workspace thread 不继承上下文。
+
+**验证**：合成 fixture 覆盖各种 attention 标记、最近或无效的 attention 时间不影响候选；同时检查运行状态、近期元数据和未完成投递仍会排除。fake CLI 的 dry-run 与假归档覆盖带 `finished` 的 agent，生产验证只做 dry-run。

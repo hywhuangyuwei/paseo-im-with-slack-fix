@@ -16,11 +16,12 @@ agent-archive/
 - **匹配 agent 名称，而不是连接名**：`paseo ls` 的 `name` 对应目录 API 的 `agent.title`，须不区分大小写同时包含 `Slack` 和 `dm`（子串，不要求顺序）。例如 `Slack GCP · dm:chat-1:thread-1`、`dm Slack AWS`。缺失标题或只命中一个词不匹配。
 - 连接仅要求 `channel=slack`，例如名为 `Slack GCP` 的连接也会被发现；支持多个 Slack 连接，各用自己的 IM state 检查。agent 必须有对应的 `im/connection` 与 `im/conversation` 标签，不能仅凭标题归档非 Slack/未关联会话。标题匹配不等同额外的会话类型检查。
 - 无 Slack 连接时正常退出；Slack 连接 ID 无效/重复、路由配置异常或读取失败时失败关闭，不放宽筛选。日志 `matched` 表示标题与 Slack 连接标签都匹配的数量，`eligible` 表示额外通过闲置及保护规则的数量。
-- 最近元数据/用户消息/关注时间及 IM 会话/job 活动均须至少闲置 24 小时；仅处理 `idle` / `closed` 且不需要关注的 agent。
+- 最近元数据/用户消息及 IM 会话/job 活动均须至少闲置 24 小时；仅处理 `idle` / `closed` 的 agent。
+- 不以 `requiresAttention`、`attentionReason` 或 `attentionTimestamp` 筛选，未读完成、错误或权限关注标记本身不会阻止归档；即使有标记，仍必须通过其他所有保护。
 - 跳过显式绑定的 agent、未完成/不确定投递、未回答问题和 IM state 中仍有 followup 的 agent。
 - 每次归档前重新读取配置、目录和 IM state，并重新校验标题（中途改名不再匹配则跳过）；使用 CLI `archive`，不传 `--force`。
 
-**边界**：检查与归档并非原子操作，仍有竞态；followup 不覆盖所有后台进程。归档保留历史文件，但旧工作区路由线程后续发消息会新建 agent，不能自动沿用旧上下文。每天一次扫描，实际通常闲置 24–48 小时才归档，停机不会补跑。
+**边界**：检查与归档并非原子操作，仍有竞态；followup 不覆盖所有后台进程。attention 不再是保护条件，带未读或待关注标记的 agent 也可能被归档。归档保留历史文件，但旧工作区路由线程后续发消息会新建 agent，不能自动沿用旧上下文。每天一次扫描，实际通常闲置 24–48 小时才归档，停机不会补跑。
 
 ### 验证与部署
 

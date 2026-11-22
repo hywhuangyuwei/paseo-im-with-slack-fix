@@ -26,9 +26,10 @@
 
 - 新增 `maintenance/agent-archive/`，接管原仓库外的归档脚本、cron 入口和独立测试；说明见 [maintenance/README.md](../maintenance/README.md)。
 - 筛选修正为 **agent 标题**（`paseo ls` 的名称）不区分大小写同时包含 `Slack` 与 `dm`；连接仅要求 `channel=slack`，支持多个连接分别检查，并保留 `im/connection`、`im/conversation` 标签校验。中途改名会在归档前重新检查。
-- 保留 24 小时闲置阈值、运行/关注/未完成投递/后台续跑/澄清问题/显式绑定保护、操作前复查和无 `--force`。归档后旧工作区线程会新建 agent，历史文件保留。
+- 保留 24 小时闲置阈值、运行状态/未完成投递/后台续跑/澄清问题/显式绑定保护、操作前复查和无 `--force`。attention 标记、原因和时间不再作为筛选项；带待关注标记的 agent 也可能被归档。归档后旧工作区线程会新建 agent，历史文件保留。
 - cron 每天 20:10 UTC（北京时间次日 04:10），运行路径迁到本仓库；锁与日志仍留仓库外。安装插件不自动注册定时任务。
-- 归档 fixture 纳入默认 Slack 相关 `npm test`，含不带 dm 的连接名、标题匹配/排除、标签隔离、24 小时阈值与归档前改名回归；子进程测试使用合成配置和 fake CLI，不接触生产归档。修复后默认 98/98 通过，typecheck、check:package、check:runtime 通过；生产 dry-run 为 `connections=1 agents=4 matched=2 eligible=0`，标题已命中但尚未全部通过闲置及保护条件。不重命名连接、不真实归档。修复根因见 gotchas §11。
+- 归档 fixture 纳入默认 Slack 相关 `npm test`，含不带 dm 的连接名、标题匹配/排除、标签隔离、24 小时阈值与归档前改名回归；子进程测试使用合成配置和 fake CLI，不接触生产归档。初次标题筛选修复的历史验证：默认 98/98 通过，生产 dry-run 为 `connections=1 agents=4 matched=2 eligible=0`；见 gotchas §11。
+- 2026-11-22 按用户要求去掉 attention 筛选，回归覆盖 `finished`/`error`/`permission` 和无效或最近的 attention 时间，以及其余保护仍生效。修改前后 typecheck 与默认测试各 134/134 通过；修改后 package/runtime、脱敏和文档链接守卫通过。首次修改后默认测试有一个 Slack fixture 清理临时目录时报 `ENOTEMPTY`，重跑全套通过。实机仅 dry-run：`connections=1 agents=22 matched=18 eligible=12`，未手动归档；候选数量随实时状态变化。根因与边界见 gotchas §14。Agent participation: autonomous；model: `nv-openrouter/openai/gpt-6.1-terra`。
 
 ### 默认测试范围：仅 Slack 相关
 
@@ -85,6 +86,7 @@
 | --- | --- | --- | --- |
 | `!m` 切换回执晚于模型响应 | 发送 `!m 关键词\n正文` 后，模型回复排在上方，`✅` 切换回执排在下方 | `deliver()` 先 `sink.start()` 发 `⏳` 占位（`msg-1`），再发 `✅` 回执（`msg-2`），最后 `sink.finish()` 原位把 `msg-1` 改成模型回复 | gotchas §13 |
 | 裸 `!m` 回复晚于模型正文 | 模型仍在生成时，查询当前模型也等待 | 只读分支绕过 agent 队列，但外层仍共用 conversation 队列 | gotchas §12 |
+| Slack dm 闲置归档被 attention 阻挡 | 已结束的旧 agent 长期不被归档 | `attentionReason=finished` 是完成关注标记，原规则将任意 attention 当作归档保护 | gotchas §14 |
 | Slack dm 归档未匹配 | ls 明明有 Slack dm agent，但脚本 connections=0 | 将 agent 名称条件误放在连接名称上，CLI name 实际对应 agent.title | gotchas §11 |
 | Slack 重连状态卡住 | 已恢复收发仍显示断开/退避 | Manager 只在首次 start 完成后清错，后续 hello 没有状态通知 | gotchas §9 |
 | IM 历史关联过多 | 已归档或无绑定会话继续展示 | 直接列举历史 conversations，未与实时未归档目录求交 | gotchas §10 |
