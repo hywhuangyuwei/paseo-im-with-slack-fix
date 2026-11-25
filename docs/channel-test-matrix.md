@@ -29,6 +29,7 @@ A✅ B✅（退避/409 终止/stop）C✅（批量去重入库+媒体落盘+call
 ### slack（30 用例）
 A✅ B✅（退避/断线重连恢复；每次 hello 上报就绪、旧 generation/stop 不再上报，Manager 清错与 start 竞态回归）C✅（过滤/replyToBot/去重落盘）D✅（mrkdwn/fence/thread_ts/messageId/三步上传/markdown 回退/editMessage not_modified）E✅（startStream→append→stop + 回退）F— G— H✅ I✅（429/invalid_auth）J✅（mrkdwn 转换/chunks）
 **共享桥接控制命令**：`tests/model-bridge.test.ts` 覆盖裸 `!m` 在模型完成 Promise 未释放时已回发原 thread、带参数切换仍排队、`edit`/`stream` 进度渠道切换回执先于进度占位与最终响应消息、授权/去重及重载恢复；独立 Pi + recorder channel 与热重载 Slack 健康验收见 `docs/webui-acceptance.md`。真实 Slack 消息端到端优先回执未测。
+**阶段正文与计时**：`tests/staged-replies.test.ts` / `tests/staged-bridge.test.ts` 覆盖增量尾行不封存、后续工具/新正文确认边界、原输入身份隔离、重叠投影分页、5 秒节拍不重置、阶段轮转顺序/分块/原 thread、慢请求与最终收尾竞态、重载防重及不确定投递。另覆盖同 ID 多投影片段聚合、无模型 ID 工具图片排除、翻页间正文增长及普通/带正文 `!m` 超时补发的阶段去重/补齐；后台续跑仍保持原有最终回复机制。
 **缺口**：interactive envelope 只 ACK 分支；completeUploadExternal 失败分支。
 
 ### discord（42 用例）

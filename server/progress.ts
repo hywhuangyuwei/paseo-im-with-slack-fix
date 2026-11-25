@@ -1,5 +1,6 @@
 import type { ChannelAdapter, AdapterContext } from "./channels/types.ts";
 import type { SendResult } from "../shared/model.ts";
+import { splitChunks } from "./format/chunks.ts";
 
 const PLACEHOLDER = "⏳ 正在处理…";
 
@@ -10,6 +11,9 @@ export interface ProgressSink {
   readonly messageId: string | null;
   start(): Promise<void>;
   refresh(elapsedSeconds: number, activity?: string): Promise<void>;
+  /** Slack only: preserve the current placeholder as a completed stage, then
+   * move the clock to a new trailing message in the same thread. */
+  stage(text: string, elapsedSeconds: number): Promise<void>;
   /** In-place completion for edit/stream channels; null means the bridge must
    * deliver every chunk itself. */
   finish(answer: string): Promise<SendResult | null>;
@@ -21,11 +25,12 @@ export function createProgressSink(
   chatId: string,
   threadId: string | undefined,
   log: AdapterContext["log"],
+  existingMessageId?: string | null,
 ): ProgressSink {
   const mode = adapter.capabilities.progress;
-  let messageId: string | null = null;
+  let messageId: string | null = mode === "edit" ? existingMessageId ?? null : null;
   let streamId: string | null = null;
-  let started = false;
+  let started = messageId !== null;
   let closed = false;
   let lastLine = "";
   let inFlight: Promise<void> | null = null;
@@ -104,6 +109,33 @@ export function createProgressSink(
           })(),
         );
       }
+    },
+    async stage(text, elapsedSeconds) {
+      if (closed || !started || adapter.channel !== "slack" || mode !== "edit") return;
+      const previous = inFlight;
+      await track((async () => {
+        if (previous) await previous.catch(() => {});
+        const chunks = splitChunks(text, adapter.capabilities.maxChunkChars);
+        const oldId = messageId;
+        // Detach BEFORE any external effect: if an edit/send fails ambiguously,
+        // finalization must never overwrite a possibly preserved stage.
+        messageId = null;
+        for (const [index, chunk] of chunks.entries()) {
+          if (index === 0 && oldId) {
+            await adapter.editMessage!(oldId, chatId, chunk);
+          } else {
+            const sent = await adapter.sendText({ chatId, threadId, text: chunk });
+            if (sent.uncertain) throw new Error("阶段回复发送状态不确定");
+            if (sent.messageId) adapter.rememberOwnMessage?.(sent.messageId);
+          }
+        }
+        const line = `⏳ ${elapsedSeconds}s · 继续处理中…`;
+        const sent = await adapter.sendText({ chatId, threadId, text: line });
+        if (sent.uncertain) throw new Error("进度消息发送状态不确定");
+        messageId = sent.messageId ?? null;
+        if (messageId) adapter.rememberOwnMessage?.(messageId);
+        lastLine = line;
+      })());
     },
     async finish(answer): Promise<SendResult | null> {
       closed = true;

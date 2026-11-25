@@ -34,7 +34,7 @@ paseo plugin add /absolute/path/to/paseo-im
 | 渠道 | 凭据 | 进度展示 | 备注 |
 | --- | --- | --- | --- |
 | Telegram | @BotFather Bot Token | 编辑同一条消息 + typing | 私聊直答、群聊 @/回复触发；topic 支持原生线程 |
-| Slack | Bot Token (xoxb) + App Token (xapp)，需 Socket Mode | 原生流式消息 | 需 `connections:write` 等 scope |
+| Slack | Bot Token (xoxb) + App Token (xapp)，需 Socket Mode | 阶段正文保留 + 5 秒计时编辑 | 需 `connections:write` 等 scope |
 | Discord | Developer Portal Bot Token | 编辑消息 + typing | 需开启 Message Content Intent；群首条 @ 自动建线程 |
 | 飞书 | App ID + App Secret（feishu/lark 域） | cardkit 流式卡（无权限时降级直发） | 需 `im:message` 读取与 `im:resource` 上传权限 |
 | 钉钉 | Client ID + Client Secret | AI Card 流式 | 需开通机器人能力；sessionWebhook 过期自动回退机器人接口 |
@@ -52,6 +52,13 @@ paseo plugin add /absolute/path/to/paseo-im
 
 - **已有 Paseo 聊天**：消息进同一 agent 与历史（可显式开启多会话共享）。
 - **工作区**：每个 IM 会话在工作区新建独立 agent（提供方/模型/模式/思考等级/系统提示词可定制）。
+
+## Slack 阶段性回复与计时
+
+- 模型在本次请求中先输出一段正文、再调用工具或继续下一段正文时，带模型消息 ID 的完整正文会原样保留在同一 Thread，不加“模型：”等前缀；不展示 reasoning、工具输出或无模型 ID 的工具图片投影。
+- 当前计时占位原位转为阶段正文，再在后面接一条计时消息；计时每 **5 秒**刷新，仍按原任务起点计算，不因阶段切换归零。最终答案替换最后的计时消息，不会跑到阶段正文上面。
+- 不是逐 token 刷屏：还在增长的尾部正文保留到最终完成；短任务也会在收尾前补齐已确认阶段。慢请求跳过重叠 tick，收尾等待在途刷新/阶段轮转。
+- 已确认阶段及当前计时消息 ID 持久化，重载后不重发；发送状态不确定时保守停止阶段转发，最终回复仍走原有路径。超时补发在完成时补齐新阶段并去重；后台任务自动续跑保持原有最终结果回发，不另加阶段计时器。
 
 ## Thread 内切换 Pi 模型
 

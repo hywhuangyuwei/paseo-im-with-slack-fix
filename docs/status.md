@@ -80,10 +80,25 @@
 - 新增 `server/pi-model-extension.ts`（并在 `package.json` 声明 `pi.extensions`），通过 `pi.on("input")` 拦截首行 `!m`，使非 IM 的 Paseo / Pi 会话同样支持裸 `!m` 查询、`!m 关键词` 纯切换及 `!m 关键词\n正文` 当轮切换。
 - 精简并统一 IM 桥接（`server/bridge.ts`）与 Pi 扩展（`server/pi-model-extension.ts`）的切换提示为 `formatModelSwitchNotice(modelId)`：`✅ 已切换模型：<modelId>`。
 
+### Slack 阶段性正文与 5 秒计时（2026-11-25 已部署）
+
+| 能力 | 实现 / 验证范围 |
+| --- | --- |
+| 阶段正文原样显示 | 仅 Slack edit 进度；同一 Thread 中保留完整阶段，不加前缀，不转发 reasoning/工具文本 |
+| 计时向后接续 | 当前占位转阶段正文，再新建尾部计时；5 秒节拍、原任务起点不变，最终答案在最后 |
+| 竞态与重载 | 整个读取/轮转/刷新周期串行；慢请求跳 tick，最终收尾等待在途操作；发送意图、已确认阶段 ID 和当前计时消息持久化 |
+| 保守降级 | 时间线缺口/异轮输入不转发阶段；发送不确定则停止阶段重发但不阻断最终回复 |
+| 原行为保持 | `!m` 先回执后正文；超时补发共用阶段补齐/去重收尾，后台自动续跑仍按原机制回发最终结果，不新增计时器 |
+
+- 修改前 `npm run typecheck && npm test`：134/134 通过；修改后双侧 typecheck 与默认 Slack 相关测试 **162/162** 通过，package/runtime、脱敏/文档链接守卫及 diff 空白检查通过。两轮独立真实 Pi + Slack recorder 均验证两段阶段正文、Thread 路由与最终顺序；未发送真实 Slack 消息。已通过 `paseo plugin reload paseo-im --json` 热重载：插件 enabled/running、`im.list=12`、Slack running/ready=true、lastError=null、`im.test=true`。未重启 daemon；验收边界与详情记录于 `docs/webui-acceptance.md`。
+- 协议边界：Paseo Pi 的 `message_update/text_delta` 是增量，assistant `message_end` 不单独投影到正文时间线；以投影快照及后续工具起点/新正文确认完整阶段，不能按短暂无变化判断完成。只读时间线始终关联原派发身份，仅接受带模型消息 ID 的正文；同 ID 的不同投影片段聚合，跨页的同一行按 seqStart 更新版本，分页用 endCursor，不以工具 seqEnd 跳行；详见 gotchas §15。
+- Agent participation: autonomous (implementation/deployment/push authorized by user); model: `nv-openrouter/openai/gpt-6.1-sol`。
+
 ## 2. 缺陷修复索引（实机调试全记录，按主题）
 
 | 主题 | 现象 | 根因 | 细节 |
 | --- | --- | --- | --- |
+| Slack 阶段正文被计时/最终回复覆盖或乱序 | 中途正文不展示；直接追加会使最终答案回到最早占位 | 计时消息过去一直复用，增量正文又没有独立完成标记；现按完整阶段轮转占位并串行收尾 | gotchas §15 |
 | `!m` 切换回执晚于模型响应 | 发送 `!m 关键词\n正文` 后，模型回复排在上方，`✅` 切换回执排在下方 | `deliver()` 先 `sink.start()` 发 `⏳` 占位（`msg-1`），再发 `✅` 回执（`msg-2`），最后 `sink.finish()` 原位把 `msg-1` 改成模型回复 | gotchas §13 |
 | 裸 `!m` 回复晚于模型正文 | 模型仍在生成时，查询当前模型也等待 | 只读分支绕过 agent 队列，但外层仍共用 conversation 队列 | gotchas §12 |
 | Slack dm 闲置归档被 attention 阻挡 | 已结束的旧 agent 长期不被归档 | `attentionReason=finished` 是完成关注标记，原规则将任意 attention 当作归档保护 | gotchas §14 |

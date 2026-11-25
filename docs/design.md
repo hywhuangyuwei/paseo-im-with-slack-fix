@@ -35,7 +35,7 @@ index.server.ts (contribute)
 数据流（入站）：`ChannelAdapter.onMessage → ChannelBridge.handle(NormalizedMessage) → Policy.authorize → QuestionRelay.tryMatch → Router.resolve(target) → AgentQueue.run(key) → dispatch（receipt 防重放）→ agent.send(text, steer)`。
 数据流（出站）：`agent turn 结束 → DaemonLink 取最终文本 → format(<channel>) → ProgressSink.finish(首块)/send(余块) → ChannelAdapter.sendText/sendMedia`。
 
-进度：dispatch 后立刻创建 ProgressSink，8s 节流刷新（已用时长 + 简短活动行），最终回复首块原位替换进度消息（edit/stream 类渠道），typing 类渠道发分段文本，none 类直接最终回复。
+进度：普通请求立即创建 ProgressSink；`!m` 带正文先发切换回执再建占位。每 5s 节流刷新（从原任务起点计算的时长 + 简短活动行），整个时间线读取/阶段轮转/计时更新周期串行，慢请求跳过重叠 tick。Slack 会将已确认完整的阶段正文写入当前占位，再创建新的尾部计时消息；最终回复首块原位替换当前进度消息（edit/stream 类渠道），typing 类渠道发分段文本，none 类直接最终回复。Slack 阶段正文只读本次 dispatch 的投影快照，以后续工具起点/另一段正文确认边界；mutable 尾行不推进游标，发送意图及已确认 ID 持久化，异常状态不盲目重发。
 
 ## 3. 核心契约（shared/ + server/channels/types.ts）
 

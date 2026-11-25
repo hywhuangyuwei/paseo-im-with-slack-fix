@@ -3,6 +3,14 @@
 前置：daemon 已重启并启用 WebUI（`features.webUi.enabled=true` 已写入 `~/.paseo/config.json`）。
 浏览器打开 `http://127.0.0.1:6767/`。
 
+## 2026-11-25 Slack 阶段性回复与 5 秒计时验收
+
+- 修改前 typecheck + 默认 Slack 相关测试 134/134 通过；本轮新增解析器、ProgressSink 和 Bridge 集成测试，覆盖阶段原样保留、同 Thread 顺序、5 秒节拍不重置、短任务补齐、增量/多片段投影、翻页增长、慢网络收尾、重载、不确定发送、普通/带正文 `!m` 超时补发去重及后台续跑共存。
+- 最终双侧 typecheck、默认 `npm test` **162/162**（0 失败/取消/跳过）、`check:package`、`check:runtime`、脱敏守卫、文档链接守卫与 `git diff --check` 全通过；未运行其他渠道全套。开发中发现的类型/测试夹具问题均已修复，以此轮完整结果为准。
+- 两轮独立真实 Pi agent + Slack recorder 验收均通过，最新一轮 `stageCount=2`、`orderedStages=true`、`finalAtTail=true`、`sameThread=true`、`clockUpdates=6`；阶段正文各显示一次，原始正文无前缀，最终答案在最后。两轮自建 agent 均已归档，未改现有 IM 聊天模型。
+- 本机执行 `paseo plugin reload paseo-im --json` 热重载成功：enabled=true、status=running；重载后 `im.list` 返回 12 渠道、Slack 1 条连接 running/ready=true、lastError=null、`im.test=true`，provider choices 可用。未重启 daemon，未改其他主机、既有聊天模型或归档定时任务。
+- 验收不读取 Slack 凭据文件、不发送真实 Slack 消息；未进行真实用户消息端到端或浏览器点击验收。计时频率与竞态由假时钟/延迟闸门回归验证，真实 Pi 验收只证明投影正文边界与展示顺序。
+
 ## 2026-11-14 Slack 状态 / 当前关联修复验收
 
 - 自动回归：`node --test tests/manager.test.ts tests/channels/slack.test.ts`，44/44 通过；类型检查、全量测试 450/450、check:package、check:runtime 和文档链接检查通过。

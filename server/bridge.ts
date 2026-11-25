@@ -28,9 +28,10 @@ import {
 } from "./model-command.ts";
 import type { Job, StateStore } from "./state-store.ts";
 import { advanceFollowup } from "./followup.ts";
+import { collectStagedReplies, type StageEntry } from "./staged-replies.ts";
 
 const maxInputChars = 12_000;
-const progressIntervalMs = 4_000;
+export const progressIntervalMs = 5_000;
 const timelineScanLimit = 200;
 
 export interface BridgeDeps {
@@ -204,7 +205,9 @@ export class Bridge {
   }
 
   private progress(job: Job): ProgressSink {
-    return createProgressSink(this.deps.adapter(), job.chatId, job.threadId ?? undefined, this.deps.log);
+    const adapter = this.deps.adapter();
+    return createProgressSink(adapter, job.chatId, job.threadId ?? undefined, this.deps.log,
+      adapter.channel === "slack" ? job.progressMessageId : null);
   }
 
   private async startProgress(jobId: string, sink: ProgressSink): Promise<void> {
@@ -224,8 +227,76 @@ export class Bridge {
     if (!sink.messageId) return;
     const current = this.deps.state.job(jobId);
     if (!current || current.delivery === "done") return;
+    await this.preserveStages(jobId, sink, elapsed).catch((error) => {
+      this.deps.log("warn", `阶段回复读取失败：${(error as Error).message}`);
+    });
+    if (this.deps.signal.aborted) return;
     const activity = await this.describeActivity(current).catch(() => undefined);
-    await sink.refresh(elapsed, activity);
+    if (!this.deps.signal.aborted) await sink.refresh(elapsed, activity);
+  }
+
+  /** One snapshot scan per clock tick (also once before finalization). Never
+   * consume a mutable trailing row with a cursor, and never relay reasoning or
+   * output belonging to a different input/automatic wakeup. */
+  private async preserveStages(jobId: string, sink: ProgressSink, elapsed: number, answer?: string): Promise<boolean> {
+    const { state, signal } = this.deps;
+    const adapter = this.deps.adapter();
+    const job = state.job(jobId);
+    if (adapter.channel !== "slack" || adapter.capabilities.progress !== "edit" || !job?.after
+      || !job.agentId || job.dispatch !== "sent" || job.questionReply || job.stagedReplies?.uncertain
+      || job.stagedReplies?.sending) return false;
+    const agent = (await this.deps.daemon()).agents.ref(job.agentId);
+    let cursor = { ...job.after };
+    const rows = new Map<number, StageEntry>();
+    let pages = 0;
+    while (true) {
+      signal.throwIfAborted();
+      const page = await agent.timeline.refetch({ direction: "after", cursor, limit: 200 });
+      if (page.error || page.epoch !== job.after.epoch || page.reset || page.staleCursor || page.gap) return false;
+      // An overlapping row can have grown since an earlier page. Replace its
+      // snapshot version rather than discarding it or appending duplicate text.
+      for (const entry of page.entries) {
+        if (entry.seqStart <= job.after.seq) continue;
+        const previous = rows.get(entry.seqStart);
+        if (!previous || entry.seqEnd >= previous.seqEnd) rows.set(entry.seqStart, entry);
+      }
+      if (!page.hasNewer) break;
+      if (!page.endCursor || page.endCursor.seq <= cursor.seq || ++pages >= 100) return false;
+      cursor = page.endCursor;
+    }
+    const snapshot = collectStagedReplies([...rows.values()].sort((a, b) => a.seqStart - b.seqStart),
+      messageIdentity(this.deps.connectionId, jobId));
+    if (!snapshot) return false;
+    const recorded = structuredClone(job.stagedReplies ?? { delivered: [], last: null, sending: null, uncertain: false });
+    for (const stage of snapshot.stages) {
+      if (recorded.delivered.includes(stage.id)) continue;
+      if (recorded.delivered.length >= 1000) break;
+      signal.throwIfAborted();
+      recorded.sending = stage.id;
+      await state.mutate((draft) => { draft.jobs[jobId]!.stagedReplies = structuredClone(recorded); });
+      try {
+        await sink.stage(stage.text, elapsed);
+      } catch (error) {
+        recorded.uncertain = true;
+        await state.mutate((draft) => {
+          draft.jobs[jobId]!.stagedReplies = structuredClone(recorded);
+          draft.jobs[jobId]!.progressMessageId = null;
+        });
+        this.deps.log("warn", `阶段回复投递状态不确定，停止阶段重发但保留最终回复：${(error as Error).message}`);
+        return false;
+      }
+      recorded.delivered.push(stage.id);
+      recorded.last = stage;
+      recorded.sending = null;
+      await state.mutate((draft) => {
+        draft.jobs[jobId]!.stagedReplies = structuredClone(recorded);
+        draft.jobs[jobId]!.progressMessageId = sink.messageId;
+      });
+    }
+    // A tool-only ending may leave lastMessage equal to an already delivered
+    // stage. Close the trailing clock, don't emit that same message twice.
+    return Boolean(answer && snapshot.last && recorded.last?.id === snapshot.last.id
+      && recorded.last.text === answer && snapshot.last.text === answer);
   }
 
   private async describeActivity(job: Job): Promise<string | undefined> {
@@ -284,12 +355,28 @@ export class Bridge {
 
   private async deliver(jobId: string): Promise<void> {
     const { state, adapter: readAdapter } = this.deps;
-    const job = state.job(jobId);
+    let job = state.job(jobId);
     if (!job || job.delivery === "done") return;
+    if (job.stagedReplies?.sending) {
+      // A crash may have happened anywhere between editing the old placeholder
+      // and receiving the new one. Never overwrite/replay either uncertain send.
+      await state.mutate((draft) => {
+        const entry = draft.jobs[jobId]!;
+        entry.stagedReplies!.uncertain = true;
+        entry.stagedReplies!.sending = null;
+        entry.progressMessageId = null;
+      });
+      job = state.job(jobId)!;
+    }
     const sink = this.progress(job);
+    let refreshing: Promise<void> | null = null;
+    const createdAt = job.createdAt;
+    const elapsed = () => Math.max(1, Math.round((Date.now() - createdAt) / 1000));
     const timer = setInterval(() => {
-      const elapsed = Math.max(1, Math.round((Date.now() - job.createdAt) / 1000));
-      void this.refreshProgress(jobId, sink, elapsed).catch(() => {});
+      // Serialize the ENTIRE read/rotate/refresh cycle, not just chat.update.
+      // Slow timeline/API calls skip ticks instead of building a backlog.
+      if (refreshing || this.deps.signal.aborted) return;
+      refreshing = this.refreshProgress(jobId, sink, elapsed()).catch(() => {}).finally(() => { refreshing = null; });
     }, progressIntervalMs);
     try {
       if (!parseModelCommand(job.text)) {
@@ -299,26 +386,11 @@ export class Bridge {
       const budgetMs = Math.max(60_000, settings.deferTimeoutMinutes * 60_000);
       const answer = await this.answerWithTimeout(job, sink, budgetMs);
       clearInterval(timer);
-      const firstChunks = splitChunks(answer, readAdapter().capabilities.maxChunkChars);
-      const first = firstChunks[0] ?? answer;
-      const replaced = await sink.finish(first).catch((error) => {
-        this.deps.log("warn", `进度消息改写失败：${(error as Error).message}`);
-        return null;
-      });
-      const rest = replaced ? firstChunks.slice(1) : firstChunks;
-      for (const chunk of rest) {
-        const sent = await readAdapter().sendText({
-          chatId: job.chatId,
-          threadId: job.threadId ?? undefined,
-          text: chunk,
-          replyToId: replaced ? undefined : job.messageId,
-        });
-        if (sent.messageId) readAdapter().rememberOwnMessage?.(sent.messageId);
-      }
-      await this.completeDelivery(jobId, answer);
-      this.deps.deferred.resolve(jobId);
+      await refreshing;
+      await this.finishAnswer(job, answer, sink);
     } catch (error) {
       clearInterval(timer);
+      await refreshing;
       if (this.deps.signal.aborted) return;
       await sink.abandon().catch(() => {});
       const raw = error instanceof Error ? (error.stack ?? error.message) : String(error);
@@ -407,8 +479,41 @@ export class Bridge {
     );
   }
 
+  /** Normal and deferred Slack completion share stage catch-up/dedup and
+   * finalization. Deferred completion starts a fresh trailing placeholder so
+   * the result stays AFTER the already-sent timeout notice. */
+  private async finishAnswer(job: Job, answer: string, sink: ProgressSink): Promise<void> {
+    const elapsed = () => Math.max(1, Math.round((Date.now() - job.createdAt) / 1000));
+    const duplicate = await this.preserveStages(job.messageId, sink, elapsed(), answer).catch(() => false);
+    this.deps.signal.throwIfAborted();
+    const text = duplicate ? `✅ 已完成 · ${elapsed()}s` : answer;
+    const adapter = this.deps.adapter();
+    const chunks = splitChunks(text, adapter.capabilities.maxChunkChars);
+    const replaced = await sink.finish(chunks[0] ?? text).catch((error) => {
+      this.deps.log("warn", `进度消息改写失败：${(error as Error).message}`);
+      return null;
+    });
+    for (const chunk of replaced ? chunks.slice(1) : chunks) {
+      const sent = await adapter.sendText({
+        chatId: job.chatId, threadId: job.threadId ?? undefined, text: chunk,
+        replyToId: replaced ? undefined : job.messageId,
+      });
+      if (sent.messageId) adapter.rememberOwnMessage?.(sent.messageId);
+    }
+    await this.completeDelivery(job.messageId, answer);
+    this.deps.deferred.resolve(job.messageId);
+  }
+
   private async deliverAnswer(job: Job, answer: string): Promise<void> {
     const { state, adapter: readAdapter } = this.deps;
+    const adapter = readAdapter();
+    if (adapter.channel === "slack" && adapter.capabilities.progress === "edit" && job.dispatch === "sent"
+      && job.after && !job.questionReply && !job.failure) {
+      const sink = createProgressSink(adapter, job.chatId, job.threadId ?? undefined, this.deps.log);
+      await this.startProgress(job.messageId, sink);
+      await this.finishAnswer(job, answer, sink);
+      return;
+    }
     const chunks = splitChunks(answer, readAdapter().capabilities.maxChunkChars);
     for (const chunk of chunks) {
       const sent = await readAdapter().sendText({

@@ -446,7 +446,7 @@ test("ProgressSink：跳过并发重叠刷新，且 finish 等待在途刷新完
       return { messageId: "msg-progress-1" };
     },
     async editMessage(_id, _chatId, text) {
-      if (text.startsWith("⏳ 4s")) {
+      if (text.startsWith("⏳ 5s")) {
         await firstEditGate.promise;
       }
       edits.push(text);
@@ -458,16 +458,16 @@ test("ProgressSink：跳过并发重叠刷新，且 finish 等待在途刷新完
   await sink.start();
   assert.equal(sink.messageId, "msg-progress-1");
 
-  // 第 4s 刷新进入慢网络等待；期间到达的第 8s 刷新应被跳过，不堆积并发请求
-  const refresh4 = sink.refresh(4, "正在思考…");
-  await sink.refresh(8, "正在执行 bash…");
+  // 第 5s 刷新进入慢网络等待；期间到达的第 10s 刷新应被跳过，不堆积并发请求
+  const refresh5 = sink.refresh(5, "正在思考…");
+  await sink.refresh(10, "正在执行 bash…");
 
-  // finish 在第 4s 刷新尚未返回时触发：应等待在途刷新结束后再写最终答案，绝不被旧进度反盖
+  // finish 在第 5s 刷新尚未返回时触发：应等待在途刷新结束后再写最终答案，绝不被旧进度反盖
   const finishPromise = sink.finish("最终答案");
   assert.equal(edits.length, 0);
   firstEditGate.resolve();
-  await Promise.all([refresh4, finishPromise]);
-  await sink.refresh(12, "不应再执行");
+  await Promise.all([refresh5, finishPromise]);
+  await sink.refresh(15, "不应再执行");
 
-  assert.deepEqual(edits, ["⏳ 4s · 正在思考…", "最终答案"]);
+  assert.deepEqual(edits, ["⏳ 5s · 正在思考…", "最终答案"]);
 });

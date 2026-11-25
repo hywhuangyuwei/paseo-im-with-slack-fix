@@ -62,6 +62,14 @@ export const jobSchema = z
       uncertain: z.boolean().default(false),
       expiresAt: z.number().int(),
     }).strict().nullable().default(null),
+    // Optional for old state/job literals. Persist the intent before rotating
+    // a Slack placeholder; ambiguous sends/reloads disable stage replay only.
+    stagedReplies: z.object({
+      delivered: z.array(z.string().max(256)).max(1000),
+      last: z.object({ id: z.string().max(256), text: z.string().max(200_000) }).strict().nullable(),
+      sending: z.string().max(256).nullable(),
+      uncertain: z.boolean(),
+    }).strict().optional(),
     progressMessageId: z.string().max(256).nullable().default(null),
     question: questionSchema.nullable().default(null),
     questionReply: z
